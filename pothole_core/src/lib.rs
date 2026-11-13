@@ -1,4 +1,5 @@
 pub mod geometry;
+pub mod inference;
 pub mod nms;
 pub mod preprocess;
 
