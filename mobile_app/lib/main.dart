@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 import 'local_db.dart';
@@ -13,11 +14,13 @@ void main() {
 class MotorbikePotholeHudApp extends StatelessWidget {
   final List<PotholeHazard>? initialHazards;
   final int initialQueuedCount;
+  final String? initialBackendUrl;
 
   const MotorbikePotholeHudApp({
     super.key,
     this.initialHazards,
     this.initialQueuedCount = 0,
+    this.initialBackendUrl,
   });
 
   @override
@@ -31,6 +34,7 @@ class MotorbikePotholeHudApp extends StatelessWidget {
       home: PotholeHudScreen(
         initialHazards: initialHazards,
         initialQueuedCount: initialQueuedCount,
+        initialBackendUrl: initialBackendUrl,
       ),
     );
   }
@@ -39,11 +43,13 @@ class MotorbikePotholeHudApp extends StatelessWidget {
 class PotholeHudScreen extends StatefulWidget {
   final List<PotholeHazard>? initialHazards;
   final int initialQueuedCount;
+  final String? initialBackendUrl;
 
   const PotholeHudScreen({
     super.key,
     this.initialHazards,
     this.initialQueuedCount = 0,
+    this.initialBackendUrl,
   });
 
   @override
@@ -59,11 +65,13 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
   int _queuedCount = 0;
   final bool _simMode = true;
   double _simStep = 0.0;
-  final String _backendUrl = 'http://192.168.1.100:8000';
+  late String _backendUrl;
+  String _syncStatusMessage = '';
 
   @override
   void initState() {
     super.initState();
+    _backendUrl = widget.initialBackendUrl ?? 'http://192.168.1.9:8000';
     _activeHazards = widget.initialHazards ?? [];
     _queuedCount = widget.initialQueuedCount;
     if (widget.initialHazards == null) {
@@ -142,6 +150,72 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
   bool get _hasCriticalAlert =>
       _activeHazards.any((h) => h.distanceMeters < 8.0 && h.confidence >= 0.75);
 
+  void _showBackendSettingsDialog() {
+    final controller = TextEditingController(text: _backendUrl);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF161F30),
+        title: const Text('Backend Server Connection', style: TextStyle(color: Color(0xFF00E5FF))),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Enter server URL (e.g. Wi-Fi IP or adb reverse):',
+              style: TextStyle(fontSize: 13, color: Colors.white70),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: controller,
+              style: const TextStyle(color: Colors.white, fontFamily: 'monospace'),
+              decoration: const InputDecoration(
+                hintText: 'http://192.168.1.9:8000',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Tips:\n• Same Wi-Fi: http://<HOST_IP>:8000\n• USB Cable: adb reverse tcp:8000 tcp:8000 -> http://localhost:8000\n• Android Emulator: http://10.0.2.2:8000',
+              style: TextStyle(fontSize: 11, color: Colors.white54),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              try {
+                final res = await http.get(Uri.parse('${controller.text}/health')).timeout(const Duration(seconds: 3));
+                if (ctx.mounted) {
+                  ScaffoldMessenger.of(ctx).showSnackBar(
+                    SnackBar(
+                      content: Text('Health check response: ${res.statusCode} ${res.body}'),
+                      backgroundColor: res.statusCode == 200 ? Colors.green : Colors.red,
+                    ),
+                  );
+                }
+              } catch (e) {
+                if (ctx.mounted) {
+                  ScaffoldMessenger.of(ctx).showSnackBar(
+                    SnackBar(content: Text('Failed to connect: $e'), backgroundColor: Colors.red),
+                  );
+                }
+              }
+            },
+            child: const Text('Test Ping', style: TextStyle(color: Color(0xFF00E5FF))),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              setState(() => _backendUrl = controller.text.trim());
+              Navigator.pop(ctx);
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -197,19 +271,38 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
                         ),
                       ),
                     ),
-                  ElevatedButton(
-                    onPressed: () async {
-                      if (_localQueue == null) return;
-                      await _localQueue!.flushBatchToBackend(
-                        apiBaseUrl: _backendUrl,
-                        deviceId: 'android-bike-01',
-                      );
-                      final remaining = await _localQueue!.getAllPending();
-                      if (mounted) {
-                        setState(() => _queuedCount = remaining.length);
-                      }
-                    },
-                    child: const Text('Sync Queue'),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.settings, color: Color(0xFF00E5FF)),
+                        tooltip: 'Configure Backend Connection',
+                        onPressed: _showBackendSettingsDialog,
+                      ),
+                      ElevatedButton(
+                        onPressed: () async {
+                          if (_localQueue == null) return;
+                          final synced = await _localQueue!.flushBatchToBackend(
+                            apiBaseUrl: _backendUrl,
+                            deviceId: 'android-bike-01',
+                          );
+                          final remaining = await _localQueue!.getAllPending();
+                          if (mounted) {
+                            setState(() {
+                              _queuedCount = remaining.length;
+                              _syncStatusMessage = 'Synced $synced items to $_backendUrl';
+                            });
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text('Synced $synced hazards to backend'),
+                                duration: const Duration(seconds: 2),
+                              ),
+                            );
+                          }
+                        },
+                        child: const Text('Sync Queue'),
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -248,25 +341,27 @@ class TacticalHudPainter extends CustomPainter {
       final boxPaint = Paint()
         ..color = color
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 3.0;
+        ..strokeWidth = isCritical ? 3.5 : 2.0;
       canvas.drawRect(rect, boxPaint);
 
+      final label = '${h.distanceMeters.toStringAsFixed(1)}m [${h.lane}]';
       final textSpan = TextSpan(
-        text:
-            '${h.lane} • ${h.distanceMeters.toStringAsFixed(1)}m • ${(h.confidence * 100).toInt()}%',
+        text: label,
         style: TextStyle(
           color: color,
-          fontSize: 12,
+          fontSize: isCritical ? 14 : 12,
           fontWeight: FontWeight.bold,
+          backgroundColor: Colors.black87,
         ),
       );
-      final tp = TextPainter(text: textSpan, textDirection: TextDirection.ltr)
-        ..layout();
-      tp.paint(canvas, Offset(rect.left, (rect.top - 18).clamp(4.0, size.height)));
+      final textPainter = TextPainter(
+        text: textSpan,
+        textDirection: TextDirection.ltr,
+      )..layout();
+      textPainter.paint(canvas, Offset(rect.left, rect.top - 18));
     }
   }
 
   @override
-  bool shouldRepaint(covariant TacticalHudPainter oldDelegate) =>
-      oldDelegate.hazards != hazards;
+  bool shouldRepaint(covariant TacticalHudPainter oldDelegate) => true;
 }

@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Motorbike Pothole System — Tactical Test Bench</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>🏍️ MOTORBIKE POTHOLE SYSTEM • TACTICAL TEST BENCH</h1>
+      <div id="connection-status" class="status-badge">DISCONNECTED</div>
+    </header>
+
+    <div class="dashboard-grid">
+      <!-- Left Column: Tactical HUD Simulator -->
+      <div class="card">
+        <h2>🎯 Tactical Motorcycle HUD Simulator (Phase 1 & 2)</h2>
+        <div class="hud-wrapper">
+          <canvas id="hud-canvas" width="600" height="340"></canvas>
+          <div id="critical-alert-banner" class="critical-banner">
+            ⚠️ CRITICAL HAZARD AHEAD: DISTANCE &lt; 8.0M ⚠️
+          </div>
+        </div>
+
+        <div class="controls-grid">
+          <div class="control-item">
+            <label for="distance-slider">Hazard Distance (Meters): <span id="distance-val" style="color:var(--accent-cyan)">6.5m</span></label>
+            <input type="range" id="distance-slider" min="2.0" max="35.0" step="0.5" value="6.5">
+          </div>
+          <div class="control-item">
+            <label for="speed-slider">Bike Speed: <span id="speed-val" style="color:var(--accent-cyan)">45 km/h</span></label>
+            <input type="range" id="speed-slider" min="0" max="100" step="5" value="45">
+          </div>
+          <div class="control-item">
+            <label>Lane Classification:</label>
+            <div class="radio-group">
+              <label><input type="radio" name="lane" value="LEFT"> LEFT</label>
+              <label><input type="radio" name="lane" value="CENTER" checked> CENTER</label>
+              <label><input type="radio" name="lane" value="RIGHT"> RIGHT</label>
+            </div>
+          </div>
+          <div class="control-item">
+            <label for="severity-slider">Severity Score (1.0 - 10.0): <span id="severity-val" style="color:var(--accent-cyan)">8.2</span></label>
+            <input type="range" id="severity-slider" min="1.0" max="10.0" step="0.1" value="8.2">
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Column: Backend & Mobile Device Connection -->
+      <div class="card">
+        <h2>📡 Backend Connection & Mobile Pairing</h2>
+        <div class="input-row">
+          <input type="text" id="server-url" value="http://127.0.0.1:8000" placeholder="http://127.0.0.1:8000">
+          <button id="ping-btn">Ping / Health Check</button>
+        </div>
+
+        <div class="mobile-guide-box">
+          <strong>📲 Physical Mobile Device Setup:</strong>
+          <p style="margin-top:4px;">1. Connect your phone & laptop to the same Wi-Fi.</p>
+          <p>2. In your mobile browser or Flutter app, connect to: <code id="wifi-ip-display">http://192.168.1.9:8000</code></p>
+          <p style="margin-top:6px;"><strong>Or via USB Cable:</strong> run <code>adb reverse tcp:8000 tcp:8000</code> and connect to <code>http://localhost:8000</code></p>
+        </div>
+
+        <h2 style="margin-top:20px;">📦 Local Offline SQLite Queue & Sync (Phase 3)</h2>
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>Event UUID</th>
+                <th>Distance</th>
+                <th>Lane</th>
+                <th>Severity</th>
+                <th>Coord (Lat, Lon)</th>
+              </tr>
+            </thead>
+            <tbody id="queue-tbody">
+              <tr><td colspan="5" style="text-align:center; color:var(--text-dim)">Queue empty</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+          <button id="enqueue-btn" class="btn-outline">+ Enqueue Detection</button>
+          <button id="dedup-btn" class="btn-warning">Test 3m Deduplication</button>
+          <button id="oversized-btn" class="btn-danger">Test &gt;100KB Rejection</button>
+          <button id="sync-btn">🚀 Flush Batch to Backend</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Live Event Log -->
+    <div class="card">
+      <h2>📜 Live Interaction & Telemetry Log</h2>
+      <div id="event-log" class="log-console"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
