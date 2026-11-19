@@ -109,6 +109,10 @@ class RustPotholeBridge {
     if (Platform.isAndroid) {
       return ffi.DynamicLibrary.open('libpothole_core.so');
     }
+    if (Platform.isIOS) {
+      // In iOS, native symbols from static libraries or embedded frameworks are resolved via process()
+      return ffi.DynamicLibrary.process();
+    }
     if (Platform.isMacOS) {
       final releasePath =
           '${Directory.current.parent.path}/pothole_core/target/release/libpothole_core.dylib';
