@@ -28,11 +28,9 @@ python user_test_experience/simulate_ride.py --server http://127.0.0.1:8000 --nu
 
 ---
 
-## Detailed Manual for Physical Device Testing
-See **[MANUAL_DEVICE_TESTING.md](MANUAL_DEVICE_TESTING.md)** for:
-- Motorbike handlebar & vibration dampener mounting guide.
-- Camera 40% horizon calibration procedures.
-- 5 step-by-step road test scenarios (<8m alerts, dead-zone offline SQLite queueing, 3m spatial deduplication, batch syncing).
+## Detailed Manuals for Physical Device Testing
+- **[MANUAL_IOS_INSTALLATION.md](MANUAL_IOS_INSTALLATION.md)**: Complete guide for Apple devices (iPhone/iPad) covering instant Safari PWA install, Xcode native compilation, developer mode, and vibration dampener requirements.
+- **[MANUAL_DEVICE_TESTING.md](MANUAL_DEVICE_TESTING.md)**: Universal field test procedure for motorbike mounting, 40% horizon calibration, and 5 road test scenarios.
 
 ---
 
