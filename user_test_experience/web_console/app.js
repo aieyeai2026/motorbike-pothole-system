@@ -168,10 +168,18 @@ document.addEventListener('DOMContentLoaded', () => {
             log(`ℹ️ On mobile Safari, continuous video requires HTTPS. If blocked, open <a href="${httpsUrl}" target="_blank" style="color:var(--accent-cyan); font-weight:bold;">${httpsUrl}</a> or use "📸 Snap Road Photo"!`);
           }
           log('📷 Requesting camera access...');
-          cameraStream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
-            audio: false,
-          });
+          try {
+            cameraStream = await navigator.mediaDevices.getUserMedia({
+              video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+              audio: false,
+            });
+          } catch (camErr) {
+            log('ℹ️ Retrying camera with generic constraints...');
+            cameraStream = await navigator.mediaDevices.getUserMedia({
+              video: true,
+              audio: false,
+            });
+          }
           webcamFeed.srcObject = cameraStream;
           await webcamFeed.play();
           isCameraActive = true;
@@ -442,7 +450,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const height = hudCanvas.height;
     const horizonY = height * 0.40;
 
-    if (isCameraActive && webcamFeed && webcamFeed.readyState >= 2) {
+    if (isCameraActive && webcamFeed && (webcamFeed.readyState >= 1 || webcamFeed.videoWidth > 0)) {
       // Draw actual live camera video frame
       ctx.drawImage(webcamFeed, 0, 0, width, height);
     } else if ((hudMode === 'PHOTO' || hudMode === 'KERALA') && staticRoadImage.complete && staticRoadImage.naturalWidth > 0) {

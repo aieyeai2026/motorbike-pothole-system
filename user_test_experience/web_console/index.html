@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="Pothole HUD">
   <meta name="theme-color" content="#070b12">
   <link rel="manifest" href="manifest.json">
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=20261119b">
 </head>
 <body>
   <div class="container">
@@ -44,7 +44,7 @@
         </div>
 
         <div class="hud-wrapper" id="hud-container">
-          <video id="webcam-feed" autoplay playsinline muted style="display:none;"></video>
+          <video id="webcam-feed" autoplay playsinline muted style="position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; z-index:-1;"></video>
           <canvas id="hud-canvas" width="600" height="340"></canvas>
           <div id="critical-alert-banner" class="critical-banner">
             ⚠️ CRITICAL HAZARD AHEAD: DISTANCE &lt; 8.0M ⚠️
@@ -170,6 +170,6 @@
     </div>
   </div>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=20261119b"></script>
 </body>
 </html>
