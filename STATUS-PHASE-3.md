@@ -2,7 +2,8 @@
 Date: 2026-11-19
 
 ## 1. PRs in Merge Order
-1. PR #6 (`feat/task-3-1-fastapi-schemas-health` -> `main`): Backend project scaffolding, Pydantic v2 schemas (`SyncBatchRequest`, `PotholeDetectionItem` with <=100 KB thumbnail validation, `SyncResponse`), and `GET /health` endpoint (`T-3.1.1`..`T-3.1.3`). Also integrates Antigravity PR & git workflow guidelines (`AGENTS.md`, `.agents/rules/git-workflow.md`) and CI suite (`.github/workflows/ci.yml`).
+1. PR #5 (`feat/task-3-1-fastapi-schemas-health` -> `main`, merge commit `9972668`): Backend project scaffolding, Pydantic v2 schemas (`SyncBatchRequest`, `PotholeDetectionItem` with <=100 KB thumbnail validation, `SyncResponse`), and `GET /health` endpoint (`T-3.1.1`..`T-3.1.3`). Also integrates Antigravity PR & git workflow guidelines (`AGENTS.md`, `.agents/rules/git-workflow.md`) and CI suite (`.github/workflows/ci.yml`).
+2. PR #6 (`feat/user-test-experience` -> `main`): User test experience suite (`user_test_experience/`), real physical device testing manual (`MANUAL_DEVICE_TESTING.md`), interactive tactical Web Console (`/console`), CLI motorbike ride simulator (`simulate_ride.py`), backend launcher with LAN IP auto-detection (`start_test_server.py`), and mobile app runtime backend URL settings dialog.
 
 ## 2. Test Counts (Quoted)
 - `cd pothole_core && cargo test`:
@@ -10,21 +11,23 @@ Date: 2026-11-19
 - `cd mobile_app && flutter test`:
   `"00:00 +5: All tests passed!"`
 - `cd pothole-sync-backend && pytest`:
-  `"3 passed in 0.16s"` (3/3 tests: `test_t_3_1_1_valid_sync_batch_request`, `test_t_3_1_2_reject_oversized_thumbnail`, `test_t_3_1_3_health_check`).
+  `"6 passed, 1 warning in 0.20s"`
+- `pytest user_test_experience/tests/test_user_experience.py`:
+  `"4 passed in 0.07s"`
 
 ## 3. CI Result
-- GitHub Actions workflow defined in `.github/workflows/ci.yml` covering Rust core tests and FastAPI Python tests.
+- GitHub Actions CI workflow (`.github/workflows/ci.yml`) passed on PR #5 (`✓ 2 successful`).
 
 ## 4. What Is Not Proven Yet
-- Live spatial clustering against PostgreSQL/PostGIS under concurrent HTTP requests.
-- Live Gemini 2.5 Flash API calls with real road hazard thumbnails in production.
+- Real-world motorbike engine vibration tolerance on camera OIS without active dampener mount.
+- Real-time video frame rate on physical mid-range Android phone under 35°C outdoor direct sunlight.
 
 ## 5. To Do By Hand
-- Verify backend API under load with uvicorn workers.
+- Execute physical road test scenarios detailed in `user_test_experience/MANUAL_DEVICE_TESTING.md` on motorbike mount.
 
 ## 6. Not Built Yet
 - Task 3.2: SQLAlchemy models (`pothole_events`, `clustered_hazards`), 3.0m Haversine spatial clustering, and event idempotency.
 - Task 3.3: `POST /api/v1/telemetry/sync`, `GET /api/v1/hazards/nearby`, and Async Gemini 2.5 Flash false-positive triage.
 
 ## 7. Open Decisions
-- Thumbnail payloads are capped at 100 KB decoded to prevent memory bloat during ingestion while preserving sufficient visual resolution for Gemini 2.5 Flash triage.
+- Configured FastAPI backend to bind to `0.0.0.0:8000` with LAN IP auto-detection and CORS enabled to support frictionless physical mobile device pairing over Wi-Fi and ADB reverse tethering.
