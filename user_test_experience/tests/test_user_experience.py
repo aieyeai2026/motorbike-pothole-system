@@ -101,3 +101,18 @@ def test_t_ux_4_web_console_structure():
     assert "id=\"hud-canvas\"" in html or "id='hud-canvas'" in html
     assert "CRITICAL" in html
     assert "sync-btn" in html or "sync_btn" in html
+
+
+def test_t_ux_5_pwa_and_mobile_camera():
+    """Verify web console includes native mobile camera capture and PWA manifest for iOS."""
+    html_path = os.path.join(parent_dir, "web_console", "index.html")
+    manifest_path = os.path.join(parent_dir, "web_console", "manifest.json")
+    with open(html_path, "r", encoding="utf-8") as f:
+        html = f.read()
+
+    assert os.path.isfile(manifest_path)
+    assert 'apple-mobile-web-app-capable' in html
+    assert 'id="camera-file-input"' in html or "id='camera-file-input'" in html
+    assert 'capture="environment"' in html or "capture='environment'" in html
+    assert 'id="snap-photo-btn"' in html or "id='snap-photo-btn'" in html
+

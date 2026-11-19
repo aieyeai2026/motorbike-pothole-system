@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Launcher for FastAPI Telemetry Server with Mobile Device Network Discovery.
-Binds to 0.0.0.0:8000 so both local machines and external mobile devices
-(via Wi-Fi or USB adb reverse) can connect and test telemetry in real time.
+Dual HTTP & HTTPS Launcher for FastAPI Telemetry Server with Mobile Device Network Discovery.
+Runs HTTP on port 8000 and HTTPS on port 8443 (enabling native iOS Safari camera WebRTC access).
 """
 
 import os
 import socket
 import sys
+import threading
 import uvicorn
 
 
@@ -15,7 +15,6 @@ def get_local_lan_ip() -> str:
     """Detect machine local LAN IP on Wi-Fi/Ethernet."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        # Does not send packets, only routes locally to discover default interface IP
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
         s.close()
@@ -24,48 +23,71 @@ def get_local_lan_ip() -> str:
         return "127.0.0.1"
 
 
-def print_banner(host: str, port: int, lan_ip: str) -> None:
-    print("=" * 72)
-    print("       🏍️  MOTORBIKE POTHOLE SYSTEM — USER TEST EXPERIENCE  🏍️")
-    print("=" * 72)
-    print(f"🖥️  Local Host URL:        http://127.0.0.1:{port}")
-    print(f"📱  Mobile Device (Wi-Fi):  http://{lan_ip}:{port}")
-    print(f"🌐  Interactive Console:   http://127.0.0.1:{port}/console")
-    print(f"📚  OpenAPI Swagger Docs:  http://127.0.0.1:{port}/docs")
-    print("-" * 72)
-    print("📲 PHYSICAL MOBILE DEVICE CONNECTION INSTRUCTIONS:")
-    print("  Option 1 (Same Wi-Fi):")
-    print(f"    • Connect phone to same Wi-Fi network.")
-    print(f"    • Open mobile browser or Flutter app.")
-    print(f"    • Point backend URL to: http://{lan_ip}:{port}")
+def print_banner(host: str, http_port: int, https_port: int, lan_ip: str) -> None:
+    print("=" * 76)
+    print("       🏍️  MOTORBIKE POTHOLE SYSTEM — DUAL HTTP/HTTPS TEST SERVER  🏍️")
+    print("=" * 76)
+    print(f"🖥️  Local Host (HTTP):        http://127.0.0.1:{http_port}")
+    print(f"📱  Mobile Browser (HTTP):    http://{lan_ip}:{http_port}/console/")
+    print(f"🔒  iPhone Live Camera (HTTPS): https://{lan_ip}:{https_port}/console/")
+    print(f"📚  OpenAPI Swagger Docs:     http://127.0.0.1:{http_port}/docs")
+    print("-" * 76)
+    print("📲 IPHONE CAMERA TESTING INSTRUCTIONS:")
+    print("  Mode A (Instant Road Photo Capture):")
+    print(f"    • Open Safari on iPhone: http://{lan_ip}:{http_port}/console/")
+    print(f"    • Tap the yellow '📸 Snap Road Photo' button to take a live photo of the road!")
     print()
-    print("  Option 2 (USB Cable + ADB Reverse Tethering):")
-    print(f"    • Plug Android phone via USB and run in terminal:")
-    print(f"        adb reverse tcp:{port} tcp:{port}")
-    print(f"    • In mobile app, point backend URL to: http://localhost:{port}")
-    print()
-    print("  Option 3 (Android Emulator):")
-    print(f"    • In Android Emulator, point backend URL to: http://10.0.2.2:{port}")
-    print("=" * 72)
-    print("Starting Uvicorn server on 0.0.0.0:8000 (Press Ctrl+C to stop)...")
-    print()
+    print("  Mode B (Continuous 30 FPS Live Video Streaming):")
+    print(f"    • Open Safari on iPhone: https://{lan_ip}:{https_port}/console/")
+    print(f"    • Tap 'Advanced' -> 'Proceed to {lan_ip}' (accept self-signed SSL).")
+    print(f"    • Tap '🎥 Live Video Stream' for real-time camera HUD tracking!")
+    print("=" * 76)
+
+
+def run_https_server(app, host: str, port: int, cert_file: str, key_file: str):
+    try:
+        uvicorn.run(
+            app,
+            host=host,
+            port=port,
+            ssl_keyfile=key_file,
+            ssl_certfile=cert_file,
+            log_level="warning",
+        )
+    except Exception as e:
+        print(f"⚠️ Could not start HTTPS server on port {port}: {e}")
 
 
 def main():
     host = "0.0.0.0"
-    port = 8000
+    http_port = 8000
+    https_port = 8443
     lan_ip = get_local_lan_ip()
 
-    # Ensure backend app is in pythonpath
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     backend_dir = os.path.join(repo_root, "pothole-sync-backend")
     if backend_dir not in sys.path:
         sys.path.insert(0, backend_dir)
 
-    print_banner(host, port, lan_ip)
+    cert_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "certs")
+    cert_file = os.path.join(cert_dir, "cert.pem")
+    key_file = os.path.join(cert_dir, "key.pem")
+
+    print_banner(host, http_port, https_port, lan_ip)
 
     from app.main import app
-    uvicorn.run(app, host=host, port=port, log_level="info")
+
+    # Start HTTPS in background thread if certificates exist
+    if os.path.isfile(cert_file) and os.path.isfile(key_file):
+        https_thread = threading.Thread(
+            target=run_https_server,
+            args=(app, host, https_port, cert_file, key_file),
+            daemon=True,
+        )
+        https_thread.start()
+
+    # Run HTTP on main thread
+    uvicorn.run(app, host=host, port=http_port, log_level="info")
 
 
 if __name__ == "__main__":
