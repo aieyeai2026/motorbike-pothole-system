@@ -1,3 +1,4 @@
+pub mod ffi;
 pub mod geometry;
 pub mod inference;
 pub mod nms;
