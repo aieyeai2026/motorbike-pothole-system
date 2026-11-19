@@ -28,3 +28,9 @@ Every engineering task must follow this exact 8-stage gate:
   - Summary of changes and components touched.
   - Linked test IDs and verification output (e.g. `pytest` result quote).
   - Milestone status report reference.
+
+## 4. Ponytail Architecture & Minimal Engineering Rule
+- When implementing features or refactoring, apply Ponytail principles (`.agents/rules/ponytail.md` and `.agents/skills/ponytail/SKILL.md`):
+  - Prioritize YAGNI, standard libraries, and codebase reuse over unnecessary dependencies and over-engineering.
+  - Deliver the smallest complete change that fully solves the task while maintaining safety, validation at trust boundaries, and test coverage.
+
