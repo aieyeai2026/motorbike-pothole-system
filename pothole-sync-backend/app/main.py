@@ -1,8 +1,17 @@
 import os
-from fastapi import FastAPI
+from typing import Any, Dict, List
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.orm import Session
+
+from app.clustering import SpatialClusteringEngine, haversine_distance_meters
+from app.database import get_db, init_db
+from app.models import ClusteredHazard
 from app.schemas import HealthResponse, SyncBatchRequest, SyncResponse
+
+init_db()
 
 app = FastAPI(
     title="Motorbike Pothole Telemetry & Spatial Clustering Backend",
@@ -26,9 +35,17 @@ async def health_check() -> HealthResponse:
 
 
 @app.post("/api/v1/telemetry/sync", response_model=SyncResponse)
-async def sync_telemetry(batch: SyncBatchRequest) -> SyncResponse:
-    """Ingest a batch of pothole detections from an edge client device."""
-    synced_uuids = [d.event_uuid for d in batch.detections]
+async def sync_telemetry(
+    batch: SyncBatchRequest, db: Session = Depends(get_db)
+) -> SyncResponse:
+    """Ingest a batch of detections, executing 3.0m spatial clustering and event idempotency."""
+    engine = SpatialClusteringEngine(db, cluster_radius_meters=3.0)
+    synced_uuids: List[str] = []
+
+    for item in batch.detections:
+        result = engine.ingest_detection(item, device_id=batch.device_id)
+        synced_uuids.append(result.event_uuid)
+
     return SyncResponse(
         status="success",
         synced_uuids=synced_uuids,
@@ -38,17 +55,39 @@ async def sync_telemetry(batch: SyncBatchRequest) -> SyncResponse:
 
 
 @app.get("/api/v1/hazards/nearby")
-async def get_nearby_hazards(lat: float, lon: float, radius_meters: float = 100.0) -> dict:
-    """Query hazards within radius_meters of lat/lon coordinate."""
+async def get_nearby_hazards(
+    lat: float, lon: float, radius_meters: float = 100.0, db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Query clustered hazards within radius_meters of lat/lon coordinate."""
+    all_clusters = db.query(ClusteredHazard).all()
+    nearby_list = []
+
+    for c in all_clusters:
+        dist = haversine_distance_meters(lat, lon, c.centroid_lat, c.centroid_lon)
+        if dist <= radius_meters:
+            nearby_list.append({
+                "cluster_uuid": c.cluster_uuid,
+                "centroid_lat": c.centroid_lat,
+                "centroid_lon": c.centroid_lon,
+                "distance_meters": round(dist, 1),
+                "detection_count": c.detection_count,
+                "max_severity": c.max_severity,
+                "avg_confidence": round(c.avg_confidence, 2),
+                "predominant_lane": c.predominant_lane,
+                "last_detected_at": c.last_detected_at,
+            })
+
+    nearby_list.sort(key=lambda x: x["distance_meters"])
+
     return {
         "status": "success",
         "query": {"latitude": lat, "longitude": lon, "radius_meters": radius_meters},
-        "hazards": [],
-        "total_count": 0,
+        "hazards": nearby_list,
+        "total_count": len(nearby_list),
     }
 
 
-# Mount the user test experience web console if directory exists
+# Mount web console static assets
 console_dir = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "user_test_experience", "web_console")
 )
@@ -57,10 +96,6 @@ if os.path.isdir(console_dir):
 
 
 @app.get("/")
-async def root() -> dict:
-    return {
-        "service": "Motorbike Pothole Telemetry & Clustering Backend",
-        "health": "/health",
-        "docs": "/docs",
-        "console": "/console",
-    }
+async def root() -> RedirectResponse:
+    """Redirect root directly to interactive web console."""
+    return RedirectResponse(url="/console/")

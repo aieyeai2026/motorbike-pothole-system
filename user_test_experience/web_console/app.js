@@ -14,17 +14,89 @@ document.addEventListener('DOMContentLoaded', () => {
   const speedVal = document.getElementById('speed-val');
   const severitySlider = document.getElementById('severity-slider');
   const severityVal = document.getElementById('severity-val');
+  const egoPosSlider = document.getElementById('ego-pos-slider');
+  const egoPosVal = document.getElementById('ego-pos-val');
+  const distLeftEdge = document.getElementById('dist-left-edge');
+  const distRightEdge = document.getElementById('dist-right-edge');
+  const centeringBadge = document.getElementById('centering-badge');
   const enqueueBtn = document.getElementById('enqueue-btn');
   const dedupBtn = document.getElementById('dedup-btn');
   const oversizedBtn = document.getElementById('oversized-btn');
   const syncBtn = document.getElementById('sync-btn');
   const queueTbody = document.getElementById('queue-tbody');
+  const toggleCameraBtn = document.getElementById('toggle-camera-btn');
+  const webcamFeed = document.getElementById('webcam-feed');
 
   // State
   let serverHealthy = false;
   let offlineQueue = [];
   let animOffset = 0;
   let audioCtx = null;
+  let isCameraActive = false;
+  let cameraStream = null;
+  let egoXRatio = 0.50;
+
+  if (egoPosSlider) {
+    egoPosSlider.addEventListener('input', (e) => {
+      egoXRatio = parseFloat(e.target.value) / 100.0;
+      const roadWidthMeters = 3.6; // Standard single travel corridor
+      const leftDist = (egoXRatio * roadWidthMeters).toFixed(1);
+      const rightDist = ((1.0 - egoXRatio) * roadWidthMeters).toFixed(1);
+      const offsetMeters = ((egoXRatio - 0.50) * roadWidthMeters).toFixed(2);
+
+      distLeftEdge.textContent = `${leftDist}m`;
+      distRightEdge.textContent = `${rightDist}m`;
+
+      if (Math.abs(offsetMeters) <= 0.25) {
+        centeringBadge.textContent = `CENTERED (${offsetMeters > 0 ? '+' : ''}${offsetMeters}m)`;
+        centeringBadge.style.background = '#00e676';
+        centeringBadge.style.color = '#000';
+        egoPosVal.textContent = `Center (50%)`;
+      } else if (offsetMeters < -0.25) {
+        centeringBadge.textContent = `DRIFT LEFT (${offsetMeters}m)`;
+        centeringBadge.style.background = '#ffab00';
+        centeringBadge.style.color = '#000';
+        egoPosVal.textContent = `Left Bias (${Math.round(egoXRatio * 100)}%)`;
+      } else {
+        centeringBadge.textContent = `DRIFT RIGHT (+${offsetMeters}m)`;
+        centeringBadge.style.background = '#ffab00';
+        centeringBadge.style.color = '#000';
+        egoPosVal.textContent = `Right Bias (${Math.round(egoXRatio * 100)}%)`;
+      }
+    });
+  }
+
+  // Toggle Live Webcam / Phone Camera
+  if (toggleCameraBtn && webcamFeed) {
+    toggleCameraBtn.addEventListener('click', async () => {
+      if (!isCameraActive) {
+        try {
+          log('📷 Requesting camera access...');
+          cameraStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+            audio: false,
+          });
+          webcamFeed.srcObject = cameraStream;
+          await webcamFeed.play();
+          isCameraActive = true;
+          toggleCameraBtn.textContent = '⏹️ Stop Camera';
+          toggleCameraBtn.className = 'btn-danger';
+          log('✅ Live camera feed active on Tactical HUD!');
+        } catch (err) {
+          log(`❌ Camera access denied or unavailable: ${err.message}`, 'error');
+        }
+      } else {
+        if (cameraStream) {
+          cameraStream.getTracks().forEach(track => track.stop());
+          cameraStream = null;
+        }
+        isCameraActive = false;
+        toggleCameraBtn.textContent = '📷 Enable Live Camera';
+        toggleCameraBtn.className = 'btn-outline';
+        log('⏹️ Live camera stopped. Reverted to synthetic road.');
+      }
+    });
+  }
 
   function log(msg, type = 'info') {
     const time = new Date().toISOString().split('T')[1].slice(0, 8);
@@ -272,15 +344,50 @@ document.addEventListener('DOMContentLoaded', () => {
     const height = hudCanvas.height;
     const horizonY = height * 0.40;
 
-    // Clear canvas
-    ctx.fillStyle = '#050911';
-    ctx.fillRect(0, 0, width, height);
+    if (isCameraActive && webcamFeed && webcamFeed.readyState >= 2) {
+      // Draw actual live camera video frame
+      ctx.drawImage(webcamFeed, 0, 0, width, height);
+    } else {
+      // Clear canvas
+      ctx.fillStyle = '#050911';
+      ctx.fillRect(0, 0, width, height);
 
-    // Sky & Stars background
-    ctx.fillStyle = '#0a1020';
-    ctx.fillRect(0, 0, width, horizonY);
+      // Sky & Stars background
+      ctx.fillStyle = '#0a1020';
+      ctx.fillRect(0, 0, width, horizonY);
 
-    // Horizon Line
+      // Road Perspective
+      const roadTopLeft = width * 0.42;
+      const roadTopRight = width * 0.58;
+      const roadBottomLeft = 0;
+      const roadBottomRight = width;
+
+      // Road surface
+      ctx.fillStyle = '#070c16';
+      ctx.beginPath();
+      ctx.moveTo(roadTopLeft, horizonY);
+      ctx.lineTo(roadTopRight, horizonY);
+      ctx.lineTo(roadBottomRight, height);
+      ctx.lineTo(roadBottomLeft, height);
+      ctx.closePath();
+      ctx.fill();
+
+      // Speed-based animated dashes
+      const speed = parseFloat(speedSlider.value);
+      animOffset = (animOffset + (speed * 0.15)) % 60;
+
+      // Road edge curbs
+      ctx.strokeStyle = '#00e5ff';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(roadTopLeft, horizonY);
+      ctx.lineTo(roadBottomLeft, height);
+      ctx.moveTo(roadTopRight, horizonY);
+      ctx.lineTo(roadBottomRight, height);
+      ctx.stroke();
+    }
+
+    // Horizon Line (40% Calibration Guide)
     ctx.strokeStyle = 'rgba(0, 229, 255, 0.4)';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
@@ -288,25 +395,8 @@ document.addEventListener('DOMContentLoaded', () => {
     ctx.lineTo(width, horizonY);
     ctx.stroke();
 
-    // Road Perspective
     const roadTopLeft = width * 0.42;
     const roadTopRight = width * 0.58;
-    const roadBottomLeft = 0;
-    const roadBottomRight = width;
-
-    // Road surface
-    ctx.fillStyle = '#070c16';
-    ctx.beginPath();
-    ctx.moveTo(roadTopLeft, horizonY);
-    ctx.lineTo(roadTopRight, horizonY);
-    ctx.lineTo(roadBottomRight, height);
-    ctx.lineTo(roadBottomLeft, height);
-    ctx.closePath();
-    ctx.fill();
-
-    // Speed-based animated dashes
-    const speed = parseFloat(speedSlider.value);
-    animOffset = (animOffset + (speed * 0.15)) % 60;
 
     // Left Lane line
     ctx.strokeStyle = 'rgba(0, 229, 255, 0.3)';
@@ -320,16 +410,6 @@ document.addEventListener('DOMContentLoaded', () => {
     ctx.beginPath();
     ctx.moveTo(roadTopLeft + (roadTopRight - roadTopLeft) * 0.66, horizonY);
     ctx.lineTo(width * 0.66, height);
-    ctx.stroke();
-
-    // Road edge curbs
-    ctx.strokeStyle = '#00e5ff';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(roadTopLeft, horizonY);
-    ctx.lineTo(roadBottomLeft, height);
-    ctx.moveTo(roadTopRight, horizonY);
-    ctx.lineTo(roadBottomRight, height);
     ctx.stroke();
 
     // Hazard Bounding Box calculation
@@ -376,11 +456,39 @@ document.addEventListener('DOMContentLoaded', () => {
     ctx.font = isCritical ? 'bold 13px monospace' : '11px monospace';
     ctx.fillText(`${distance.toFixed(1)}m [${lane}]`, boxX + 4, boxY - 7);
 
-    // Motorbike handlebar HUD indicator
-    ctx.fillStyle = 'rgba(0, 229, 255, 0.7)';
+    // Motorbike handlebar & Ego Position Reticle
+    const bikeX = width * egoXRatio;
+    const bikeY = height - 16;
+
+    // Draw projected trajectory path from motorbike up to vanishing point
+    const vanishingX = width * 0.50;
+    ctx.strokeStyle = Math.abs(egoXRatio - 0.50) <= 0.08 ? 'rgba(0, 230, 118, 0.45)' : 'rgba(255, 171, 0, 0.55)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 6]);
     ctx.beginPath();
-    ctx.arc(width / 2, height - 12, 8, 0, Math.PI * 2);
+    ctx.moveTo(bikeX, bikeY);
+    ctx.lineTo(vanishingX, horizonY);
+    ctx.stroke();
+    ctx.setLineDash([]); // Reset line dash
+
+    // Motorbike Cockpit Center Marker
+    ctx.fillStyle = Math.abs(egoXRatio - 0.50) <= 0.08 ? '#00e676' : '#ffab00';
+    ctx.beginPath();
+    ctx.arc(bikeX, bikeY, 9, 0, Math.PI * 2);
     ctx.fill();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Crosshairs on motorcycle center
+    ctx.strokeStyle = '#000000';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(bikeX - 5, bikeY);
+    ctx.lineTo(bikeX + 5, bikeY);
+    ctx.moveTo(bikeX, bikeY - 5);
+    ctx.lineTo(bikeX, bikeY + 5);
+    ctx.stroke();
 
     requestAnimationFrame(renderHUD);
   }
