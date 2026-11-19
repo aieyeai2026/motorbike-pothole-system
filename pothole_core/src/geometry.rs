@@ -32,6 +32,59 @@ pub fn estimate_distance_meters(
     distance.clamp(min_distance_m, max_distance_m)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CenteringStatus {
+    Centered,
+    DriftingLeft,
+    DriftingRight,
+}
+
+impl CenteringStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CenteringStatus::Centered => "CENTERED",
+            CenteringStatus::DriftingLeft => "DRIFTING_LEFT",
+            CenteringStatus::DriftingRight => "DRIFTING_RIGHT",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LaneCentering {
+    pub offset_meters: f32,
+    pub dist_left_m: f32,
+    pub dist_right_m: f32,
+    pub status: CenteringStatus,
+}
+
+pub fn compute_lane_centering(
+    x_ego: f32,
+    x_left_border: f32,
+    x_right_border: f32,
+    road_width_m: f32,
+) -> LaneCentering {
+    let road_span = (x_right_border - x_left_border).max(0.01);
+    let norm_pos = ((x_ego - x_left_border) / road_span).clamp(0.0, 1.0);
+    let dist_left_m = norm_pos * road_width_m;
+    let dist_right_m = (1.0 - norm_pos) * road_width_m;
+    let offset_meters = (norm_pos - 0.5) * road_width_m;
+
+    let status = if offset_meters.abs() <= 0.25 {
+        CenteringStatus::Centered
+    } else if offset_meters < -0.25 {
+        CenteringStatus::DriftingLeft
+    } else {
+        CenteringStatus::DriftingRight
+    };
+
+    LaneCentering {
+        offset_meters,
+        dist_left_m,
+        dist_right_m,
+        status,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,5 +104,22 @@ mod tests {
         assert_eq!(classify_lane(0.10), Lane::Left);
         assert_eq!(classify_lane(0.50), Lane::Center);
         assert_eq!(classify_lane(0.95), Lane::Right);
+    }
+
+    #[test]
+    fn t_1_1_3_compute_lane_centering_detects_center_and_drift() {
+        let center = compute_lane_centering(0.50, 0.0, 1.0, 3.6);
+        assert_eq!(center.status, CenteringStatus::Centered);
+        assert!((center.offset_meters).abs() < 1e-4);
+        assert!((center.dist_left_m - 1.8).abs() < 1e-4);
+        assert!((center.dist_right_m - 1.8).abs() < 1e-4);
+
+        let drift_left = compute_lane_centering(0.20, 0.0, 1.0, 3.6);
+        assert_eq!(drift_left.status, CenteringStatus::DriftingLeft);
+        assert!(drift_left.offset_meters < -0.25);
+
+        let drift_right = compute_lane_centering(0.80, 0.0, 1.0, 3.6);
+        assert_eq!(drift_right.status, CenteringStatus::DriftingRight);
+        assert!(drift_right.offset_meters > 0.25);
     }
 }

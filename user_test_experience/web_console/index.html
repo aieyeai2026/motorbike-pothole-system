@@ -16,15 +16,29 @@
     <div class="dashboard-grid">
       <!-- Left Column: Tactical HUD Simulator -->
       <div class="card">
-        <h2>🎯 Tactical Motorcycle HUD Simulator (Phase 1 & 2)</h2>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+          <h2 style="margin:0; border:none; padding:0;">🎯 Tactical Motorcycle HUD</h2>
+          <button id="toggle-camera-btn" class="btn-outline" style="padding:6px 14px; font-size:0.85rem;">📷 Enable Live Camera</button>
+        </div>
         <div class="hud-wrapper">
+          <video id="webcam-feed" autoplay playsinline muted style="display:none;"></video>
           <canvas id="hud-canvas" width="600" height="340"></canvas>
           <div id="critical-alert-banner" class="critical-banner">
             ⚠️ CRITICAL HAZARD AHEAD: DISTANCE &lt; 8.0M ⚠️
           </div>
+          <!-- Road Centering & Ego Position HUD Overlay -->
+          <div id="lane-centering-hud" style="position:absolute; bottom:12px; left:50%; transform:translateX(-50%); background:rgba(6,10,18,0.9); border:1px solid #00e5ff; border-radius:6px; padding:4px 12px; font-family:var(--font-mono); font-size:0.78rem; color:#00e5ff; display:flex; gap:12px; align-items:center;">
+            <span>L: <span id="dist-left-edge">1.8m</span></span>
+            <span id="centering-badge" style="background:#00e676; color:#000; font-weight:bold; padding:2px 6px; border-radius:4px;">CENTERED (0.0m)</span>
+            <span>R: <span id="dist-right-edge">1.8m</span></span>
+          </div>
         </div>
 
         <div class="controls-grid">
+          <div class="control-item" style="grid-column: 1 / -1;">
+            <label for="ego-pos-slider">🏍️ Motorbike Lateral Position in Road: <span id="ego-pos-val" style="color:var(--accent-cyan)">Center (50%)</span></label>
+            <input type="range" id="ego-pos-slider" min="10" max="90" step="1" value="50">
+          </div>
           <div class="control-item">
             <label for="distance-slider">Hazard Distance (Meters): <span id="distance-val" style="color:var(--accent-cyan)">6.5m</span></label>
             <input type="range" id="distance-slider" min="2.0" max="35.0" step="0.5" value="6.5">
@@ -94,6 +108,32 @@
     <div class="card">
       <h2>📜 Live Interaction & Telemetry Log</h2>
       <div id="event-log" class="log-console"></div>
+    </div>
+
+    <!-- Road Boundary & Lane Calibration Card -->
+    <div class="card" style="margin-top:20px;">
+      <h2>🛣️ Road Boundary & Dynamic Lane Calibration (Kakkanad SmartCity Road)</h2>
+      <p style="color:var(--text-dim); margin-bottom:12px; font-size:0.9rem;">
+        Calibrated perspective boundary lines for real-world Kerala road geometry:
+        <strong>Left Curb</strong> ($x \approx 0.02 \to 0.41$), <strong>Center Median</strong> ($x \approx 0.46 \to 0.50$), and <strong>Curved Right Boundary</strong> ($x \approx 0.95 \to 0.56$).
+      </p>
+      <div style="text-align:center; background:#000; border-radius:8px; overflow:hidden; border:1px solid var(--panel-border);">
+        <img src="kakkanad_lane_calibrated.jpg" alt="Calibrated Road Boundaries" style="max-width:100%; height:auto; display:block; margin:0 auto;">
+      </div>
+      <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; margin-top:14px; font-size:0.85rem;">
+        <div style="background:#08101e; padding:10px; border-left:3px solid var(--accent-green); border-radius:4px;">
+          <strong style="color:var(--accent-green);">🟢 Left Lane Corridor:</strong><br>
+          Covers oncoming traffic / overtaking space between left curb and center divider.
+        </div>
+        <div style="background:#08101e; padding:10px; border-left:3px solid var(--accent-amber); border-radius:4px;">
+          <strong style="color:var(--accent-amber);">🟡 Median Hazard:</strong><br>
+          Center chevron island with traffic barrel detected at <strong>16.5m</strong>.
+        </div>
+        <div style="background:#08101e; padding:10px; border-left:3px solid var(--accent-red); border-radius:4px;">
+          <strong style="color:var(--accent-red);">🔴 Foreground Critical:</strong><br>
+          'GO SLOW' barrier detected at <strong>5.2m</strong> (&lt; 8m Critical HUD Alert!).
+        </div>
+      </div>
     </div>
   </div>
 
