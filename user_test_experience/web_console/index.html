@@ -2,32 +2,55 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Motorbike Pothole System — Tactical Test Bench</title>
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Pothole HUD">
+  <meta name="theme-color" content="#070b12">
+  <link rel="manifest" href="manifest.json">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <div class="container">
     <header>
-      <h1>🏍️ MOTORBIKE POTHOLE SYSTEM • TACTICAL TEST BENCH</h1>
+      <h1>🏍️ MOTORBIKE POTHOLE SYSTEM • TACTICAL HUD</h1>
       <div id="connection-status" class="status-badge">DISCONNECTED</div>
     </header>
 
+    <!-- iOS Install Banner -->
+    <div class="ios-install-banner">
+      <strong>📲 INSTALL ON IPHONE (NO XCODE NEEDED):</strong>
+      Tap Safari's Share button (📤) at the bottom &rarr; tap <strong>"Add to Home Screen"</strong> (➕).
+      It instantly installs with an App icon on your home screen and launches full-screen like a native app!
+    </div>
+
     <div class="dashboard-grid">
-      <!-- Left Column: Tactical HUD Simulator -->
+      <!-- Left Column: Tactical HUD Simulator & Live Camera -->
       <div class="card">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-          <h2 style="margin:0; border:none; padding:0;">🎯 Tactical Motorcycle HUD</h2>
-          <button id="toggle-camera-btn" class="btn-outline" style="padding:6px 14px; font-size:0.85rem;">📷 Enable Live Camera</button>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
+          <h2 style="margin:0; border:none; padding:0;">🎯 Motorcycle Tactical HUD</h2>
+          <span id="hud-source-indicator" style="font-family:var(--font-mono); font-size:0.75rem; background:rgba(0,229,255,0.15); color:var(--accent-cyan); padding:3px 8px; border-radius:4px; border:1px solid var(--accent-cyan);">MODE: SYNTHETIC ROAD</span>
         </div>
-        <div class="hud-wrapper">
+
+        <!-- Camera / Action Quick Bar -->
+        <div class="hud-action-bar">
+          <input type="file" id="camera-file-input" accept="image/*" capture="environment" style="display:none;">
+          <button id="snap-photo-btn" class="btn-highlight">📸 Snap Road Photo (iOS Camera)</button>
+          <button id="toggle-camera-btn" class="btn-outline">🎥 30 FPS Live Stream</button>
+          <button id="load-kerala-btn" class="btn-outline">🛣️ Kerala SmartCity Road</button>
+          <button id="reset-sim-btn" class="btn-outline">🕹️ Synthetic Road</button>
+          <button id="fullscreen-btn" class="btn-outline">⛶ Fullscreen</button>
+        </div>
+
+        <div class="hud-wrapper" id="hud-container">
           <video id="webcam-feed" autoplay playsinline muted style="display:none;"></video>
           <canvas id="hud-canvas" width="600" height="340"></canvas>
           <div id="critical-alert-banner" class="critical-banner">
             ⚠️ CRITICAL HAZARD AHEAD: DISTANCE &lt; 8.0M ⚠️
           </div>
           <!-- Road Centering & Ego Position HUD Overlay -->
-          <div id="lane-centering-hud" style="position:absolute; bottom:12px; left:50%; transform:translateX(-50%); background:rgba(6,10,18,0.9); border:1px solid #00e5ff; border-radius:6px; padding:4px 12px; font-family:var(--font-mono); font-size:0.78rem; color:#00e5ff; display:flex; gap:12px; align-items:center;">
+          <div id="lane-centering-hud" style="position:absolute; bottom:12px; left:50%; transform:translateX(-50%); background:rgba(6,10,18,0.9); border:1px solid #00e5ff; border-radius:6px; padding:4px 12px; font-family:var(--font-mono); font-size:0.78rem; color:#00e5ff; display:flex; gap:12px; align-items:center; z-index:10;">
             <span>L: <span id="dist-left-edge">1.8m</span></span>
             <span id="centering-badge" style="background:#00e676; color:#000; font-weight:bold; padding:2px 6px; border-radius:4px;">CENTERED (0.0m)</span>
             <span>R: <span id="dist-right-edge">1.8m</span></span>
@@ -71,10 +94,20 @@
         </div>
 
         <div class="mobile-guide-box">
-          <strong>📲 Physical Mobile Device Setup:</strong>
-          <p style="margin-top:4px;">1. Connect your phone & laptop to the same Wi-Fi.</p>
-          <p>2. In your mobile browser or Flutter app, connect to: <code id="wifi-ip-display">http://192.168.1.9:8000</code></p>
-          <p style="margin-top:6px;"><strong>Or via USB Cable:</strong> run <code>adb reverse tcp:8000 tcp:8000</code> and connect to <code>http://localhost:8000</code></p>
+          <strong>📲 iPhone Connection & Camera Streaming Options:</strong>
+          <p style="margin-top:6px;">
+            <strong>Option 1 (Instant Road Photo Snap):</strong><br>
+            Connect to <code>http://192.168.1.9:8000/console/</code> and tap the yellow <strong>"📸 Snap Road Photo"</strong> button. Works natively in Safari on HTTP with zero certificate steps!
+          </p>
+          <p style="margin-top:8px;">
+            <strong>Option 2 (30 FPS Continuous Live Video Feed):</strong><br>
+            Connect to <a href="https://192.168.1.9:8443/console/" target="_blank" style="color:var(--accent-cyan); font-weight:bold;">https://192.168.1.9:8443/console/</a>.
+            Tap <em>Show Details &rarr; Visit this Website</em> to trust local SSL, then tap <strong>"🎥 30 FPS Live Stream"</strong> for continuous rear-camera tracking!
+          </p>
+          <p style="margin-top:8px;">
+            <strong>Option 3 (Install PWA App):</strong><br>
+            Tap Safari's Share button (📤) &rarr; tap <strong>"Add to Home Screen"</strong>.
+          </p>
         </div>
 
         <h2 style="margin-top:20px;">📦 Local Offline SQLite Queue & Sync (Phase 3)</h2>
@@ -115,7 +148,7 @@
       <h2>🛣️ Road Boundary & Dynamic Lane Calibration (Kakkanad SmartCity Road)</h2>
       <p style="color:var(--text-dim); margin-bottom:12px; font-size:0.9rem;">
         Calibrated perspective boundary lines for real-world Kerala road geometry:
-        <strong>Left Curb</strong> ($x \approx 0.02 \to 0.41$), <strong>Center Median</strong> ($x \approx 0.46 \to 0.50$), and <strong>Curved Right Boundary</strong> ($x \approx 0.95 \to 0.56$).
+        <strong>Left Curb</strong> (x &approx; 0.02 &rarr; 0.41), <strong>Center Median</strong> (x &approx; 0.46 &rarr; 0.50), and <strong>Curved Right Boundary</strong> (x &approx; 0.95 &rarr; 0.56).
       </p>
       <div style="text-align:center; background:#000; border-radius:8px; overflow:hidden; border:1px solid var(--panel-border);">
         <img src="kakkanad_lane_calibrated.jpg" alt="Calibrated Road Boundaries" style="max-width:100%; height:auto; display:block; margin:0 auto;">

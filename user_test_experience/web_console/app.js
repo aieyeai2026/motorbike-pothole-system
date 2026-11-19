@@ -26,6 +26,13 @@ document.addEventListener('DOMContentLoaded', () => {
   const queueTbody = document.getElementById('queue-tbody');
   const toggleCameraBtn = document.getElementById('toggle-camera-btn');
   const webcamFeed = document.getElementById('webcam-feed');
+  const cameraFileInput = document.getElementById('camera-file-input');
+  const snapPhotoBtn = document.getElementById('snap-photo-btn');
+  const loadKeralaBtn = document.getElementById('load-kerala-btn');
+  const resetSimBtn = document.getElementById('reset-sim-btn');
+  const fullscreenBtn = document.getElementById('fullscreen-btn');
+  const hudContainer = document.getElementById('hud-container');
+  const hudSourceIndicator = document.getElementById('hud-source-indicator');
 
   // State
   let serverHealthy = false;
@@ -35,6 +42,91 @@ document.addEventListener('DOMContentLoaded', () => {
   let isCameraActive = false;
   let cameraStream = null;
   let egoXRatio = 0.50;
+  let hudMode = 'SYNTHETIC'; // 'SYNTHETIC' | 'PHOTO' | 'KERALA' | 'LIVE_VIDEO'
+  const staticRoadImage = new Image();
+
+  function updateHudMode(mode, label) {
+    hudMode = mode;
+    if (hudSourceIndicator) {
+      hudSourceIndicator.textContent = `MODE: ${label}`;
+    }
+  }
+
+  // Native Camera Photo Snap (iOS / Android / Desktop)
+  if (snapPhotoBtn && cameraFileInput) {
+    snapPhotoBtn.addEventListener('click', () => {
+      cameraFileInput.click();
+    });
+
+    cameraFileInput.addEventListener('change', (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+
+      log(`📸 Captured road photo: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`);
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        staticRoadImage.onload = () => {
+          if (isCameraActive && cameraStream) {
+            cameraStream.getTracks().forEach(t => t.stop());
+            cameraStream = null;
+            isCameraActive = false;
+            toggleCameraBtn.textContent = '🎥 30 FPS Live Stream';
+            toggleCameraBtn.className = 'btn-outline';
+          }
+          updateHudMode('PHOTO', 'LIVE ROAD PHOTO');
+          log('✅ Live road photo loaded onto Tactical HUD! Applying boundary detection & centering.');
+        };
+        staticRoadImage.src = event.target.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  // Load Calibrated Kerala Road (Kakkanad SmartCity)
+  if (loadKeralaBtn) {
+    loadKeralaBtn.addEventListener('click', () => {
+      staticRoadImage.onload = () => {
+        if (isCameraActive && cameraStream) {
+          cameraStream.getTracks().forEach(t => t.stop());
+          cameraStream = null;
+          isCameraActive = false;
+          toggleCameraBtn.textContent = '🎥 30 FPS Live Stream';
+          toggleCameraBtn.className = 'btn-outline';
+        }
+        updateHudMode('KERALA', 'REAL KERALA ROAD (KAKKANAD)');
+        log('🛣️ Calibrated Kerala SmartCity road loaded onto Tactical HUD!');
+      };
+      staticRoadImage.src = 'kakkanad_lane_calibrated.jpg';
+    });
+  }
+
+  // Reset to Synthetic Simulator Grid
+  if (resetSimBtn) {
+    resetSimBtn.addEventListener('click', () => {
+      if (isCameraActive && cameraStream) {
+        cameraStream.getTracks().forEach(t => t.stop());
+        cameraStream = null;
+        isCameraActive = false;
+        toggleCameraBtn.textContent = '🎥 30 FPS Live Stream';
+        toggleCameraBtn.className = 'btn-outline';
+      }
+      updateHudMode('SYNTHETIC', 'SYNTHETIC ROAD');
+      log('🕹️ Switched to synthetic 2D road simulation grid.');
+    });
+  }
+
+  // Fullscreen HUD Mode
+  if (fullscreenBtn && hudContainer) {
+    fullscreenBtn.addEventListener('click', () => {
+      if (!document.fullscreenElement) {
+        hudContainer.requestFullscreen().catch(err => {
+          log(`Fullscreen request error: ${err.message}`, 'error');
+        });
+      } else {
+        document.exitFullscreen();
+      }
+    });
+  }
 
   if (egoPosSlider) {
     egoPosSlider.addEventListener('input', (e) => {
@@ -71,6 +163,10 @@ document.addEventListener('DOMContentLoaded', () => {
     toggleCameraBtn.addEventListener('click', async () => {
       if (!isCameraActive) {
         try {
+          if (window.location.protocol === 'http:' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+            const httpsUrl = `https://${window.location.hostname}:8443/console/`;
+            log(`ℹ️ On mobile Safari, continuous video requires HTTPS. If blocked, open <a href="${httpsUrl}" target="_blank" style="color:var(--accent-cyan); font-weight:bold;">${httpsUrl}</a> or use "📸 Snap Road Photo"!`);
+          }
           log('📷 Requesting camera access...');
           cameraStream = await navigator.mediaDevices.getUserMedia({
             video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
@@ -79,11 +175,12 @@ document.addEventListener('DOMContentLoaded', () => {
           webcamFeed.srcObject = cameraStream;
           await webcamFeed.play();
           isCameraActive = true;
+          updateHudMode('LIVE_VIDEO', '30 FPS LIVE CAMERA');
           toggleCameraBtn.textContent = '⏹️ Stop Camera';
           toggleCameraBtn.className = 'btn-danger';
           log('✅ Live camera feed active on Tactical HUD!');
         } catch (err) {
-          log(`❌ Camera access denied or unavailable: ${err.message}`, 'error');
+          log(`❌ Camera stream error: ${err.message}. Tap the yellow "📸 Snap Road Photo" button for instant camera capture!`, 'error');
         }
       } else {
         if (cameraStream) {
@@ -91,7 +188,8 @@ document.addEventListener('DOMContentLoaded', () => {
           cameraStream = null;
         }
         isCameraActive = false;
-        toggleCameraBtn.textContent = '📷 Enable Live Camera';
+        updateHudMode('SYNTHETIC', 'SYNTHETIC ROAD');
+        toggleCameraBtn.textContent = '🎥 30 FPS Live Stream';
         toggleCameraBtn.className = 'btn-outline';
         log('⏹️ Live camera stopped. Reverted to synthetic road.');
       }
@@ -347,6 +445,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (isCameraActive && webcamFeed && webcamFeed.readyState >= 2) {
       // Draw actual live camera video frame
       ctx.drawImage(webcamFeed, 0, 0, width, height);
+    } else if ((hudMode === 'PHOTO' || hudMode === 'KERALA') && staticRoadImage.complete && staticRoadImage.naturalWidth > 0) {
+      // Draw real road photograph (Kerala SmartCity or user photo)
+      ctx.drawImage(staticRoadImage, 0, 0, width, height);
     } else {
       // Clear canvas
       ctx.fillStyle = '#050911';
