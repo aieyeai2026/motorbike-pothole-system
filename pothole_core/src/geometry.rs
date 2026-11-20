@@ -217,7 +217,8 @@ pub fn eval_cyan_road_boundary(
 ) -> f32 {
     let span = (y_bot - y_vp).max(0.05);
     let t = ((y - y_vp) / span).clamp(0.0, 1.0);
-    x_vp + (x_bot - x_vp) * t.powf(1.3) + kappa_road * (std::f32::consts::PI * t).sin()
+    let curve_offset = kappa_road * t * (std::f32::consts::PI * t).sin();
+    x_vp + (x_bot - x_vp) * t.powf(1.3) + curve_offset
 }
 
 /// Computes Phase 8 "Green Carpet" left/right edges `(carpet_left, carpet_right)` at row `y`,
@@ -368,11 +369,15 @@ mod tests {
         assert!((xl_bot - 0.12).abs() < 1e-5);
         assert!((xr_bot - 0.88).abs() < 1e-5);
 
-        for step in 1..=10 {
-            let y = 0.54 + (0.88 - 0.54) * (step as f32 / 10.0);
-            let xl = eval_cyan_road_boundary(y, 0.50, 0.54, 0.88, 0.12, 0.08);
-            let xr = eval_cyan_road_boundary(y, 0.50, 0.54, 0.88, 0.88, 0.08);
-            assert!(xl < xr);
+        for kappa in [0.14f32, -0.14f32] {
+            for step in 1..=100 {
+                let y = 0.54 + (0.88 - 0.54) * (step as f32 / 100.0);
+                let xl = eval_cyan_road_boundary(y, 0.50, 0.54, 0.88, 0.12, kappa);
+                let xr = eval_cyan_road_boundary(y, 0.50, 0.54, 0.88, 0.88, kappa);
+                assert!(xl < xr);
+                assert!(xl <= 0.50 + 1e-4, "left curve hooked past x_vp at y={y} kappa={kappa}: xl={xl}");
+                assert!(xr >= 0.50 - 1e-4, "right curve hooked past x_vp at y={y} kappa={kappa}: xr={xr}");
+            }
         }
 
         // Green carpet width tapers with exponent 1.4 and weaves toward target_gap_x
