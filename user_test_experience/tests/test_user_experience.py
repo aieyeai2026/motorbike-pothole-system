@@ -116,3 +116,90 @@ def test_t_ux_5_pwa_and_mobile_camera():
     assert 'capture="environment"' in html or "capture='environment'" in html
     assert 'id="snap-photo-btn"' in html or "id='snap-photo-btn'" in html
 
+
+def test_t_ux_6_video_evaluator_files_and_controls():
+    """Verify dual video evaluation web app contains synchronized controls, curtain slider, and telemetry HUD."""
+    eval_dir = os.path.join(parent_dir, "video_evaluator")
+    html_path = os.path.join(eval_dir, "index.html")
+    js_path = os.path.join(eval_dir, "app.js")
+    css_path = os.path.join(eval_dir, "style.css")
+    server_path = os.path.join(eval_dir, "server.py")
+
+    assert os.path.isfile(html_path)
+    assert os.path.isfile(js_path)
+    assert os.path.isfile(css_path)
+    assert os.path.isfile(server_path)
+
+    with open(html_path, "r", encoding="utf-8") as f:
+        html = f.read()
+
+    # 1. Dual Video Player & Curtain Slider
+    assert 'id="video-raw"' in html
+    assert 'id="video-hud"' in html
+    assert 'id="curtain-toggle-btn"' in html
+    assert 'id="curtain-slider"' in html
+
+    # 2. Synchronized Playback Controls
+    assert 'id="play-pause-btn"' in html
+    assert 'id="timeline-scrubber"' in html
+    assert 'id="step-back-btn"' in html
+    assert 'id="step-fwd-btn"' in html
+    assert 'id="speed-selector"' in html
+
+    # 3. Video Loading & Live Pipeline Processing
+    assert 'id="raw-file-input"' in html
+    assert 'id="hud-file-input"' in html
+    assert 'id="process-upload-btn"' in html
+
+    # 4. Synchronized Telemetry & Evaluation HUD
+    assert 'id="timecode-display"' in html
+    assert 'id="metric-hazard-count"' in html
+    assert 'id="metric-closest-distance"' in html
+    assert 'id="metric-assigned-lane"' in html
+    assert 'id="metric-fps-latency"' in html
+
+
+def test_t_ux_7_video_evaluator_live_rust_pipeline_on_uploaded_video(tmp_path):
+    """Verify video evaluator HTTP server parses Range headers and processes real uploaded video frames through Rust FFI."""
+    import cv2
+    import numpy as np
+    from video_evaluator.server import (
+        parse_byte_range,
+        get_available_presets,
+        process_video_through_rust_pipeline,
+    )
+
+    assert parse_byte_range("bytes=0-1023", 5000) == (0, 1023)
+    assert parse_byte_range("bytes=100-", 5000) == (100, 4999)
+    assert parse_byte_range(None, 5000) is None
+
+    presets = get_available_presets()
+    assert isinstance(presets, list)
+    assert len(presets) >= 1
+
+    # Create a real 10-frame road video with a high-contrast pothole depression and road edge lines
+    in_video = str(tmp_path / "raw_upload.mp4")
+    out_video = str(tmp_path / "processed_out.mp4")
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(in_video, fourcc, 30.0, (640, 360))
+    for i in range(10):
+        frame = np.full((360, 640, 3), 120, dtype=np.uint8)
+        frame[:144, :] = (200, 180, 150)
+        cv2.line(frame, (260, 144), (40, 360), (245, 245, 245), 3)
+        cv2.line(frame, (380, 144), (600, 360), (245, 245, 245), 3)
+        cv2.rectangle(frame, (290, 250 + i), (350, 285 + i), (18, 18, 22), -1)
+        cv2.rectangle(frame, (290, 250 + i), (350, 285 + i), (210, 210, 210), 2)
+        writer.write(frame)
+    writer.release()
+
+    result = process_video_through_rust_pipeline(in_video, out_video, max_frames=10, convert_h264=False)
+    assert os.path.isfile(result["output_path"])
+    assert os.path.getsize(result["output_path"]) > 0
+    assert result["frames_processed"] == 10
+    assert len(result["telemetry"]) == 10
+    assert result["telemetry"][0]["hazard_count"] >= 1
+    assert "closest_distance_m" in result["telemetry"][0]
+    assert "assigned_lane" in result["telemetry"][0]
+    assert "postprocess_ms" in result["telemetry"][0]
+
+
