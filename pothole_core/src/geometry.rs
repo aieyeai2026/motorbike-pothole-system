@@ -181,6 +181,68 @@ pub fn inverse_perspective_y_for_distance(
     (horizon + road_progress * (1.0 - horizon)).clamp(horizon, 1.0)
 }
 
+/// Computes smoothed road vanishing point `(x_vp, y_vp)` from left/right boundary tangents
+/// `x(y) = m * y + c`, and estimates camera banking tilt angle `theta_bank` in radians.
+pub fn compute_vanishing_point_and_bank(
+    m_left: f32,
+    c_left: f32,
+    m_right: f32,
+    c_right: f32,
+    prev_x_vp: f32,
+    prev_y_vp: f32,
+) -> (f32, f32, f32) {
+    let denom = m_left - m_right;
+    let (x_meas, y_meas) = if denom.abs() > 1e-4 {
+        let y_int = ((c_right - c_left) / denom).clamp(0.48, 0.58);
+        let x_int = (0.5 * ((m_left * y_int + c_left) + (m_right * y_int + c_right))).clamp(0.15, 0.85);
+        (x_int, y_int)
+    } else {
+        (prev_x_vp.clamp(0.15, 0.85), prev_y_vp.clamp(0.48, 0.58))
+    };
+
+    let x_vp = (0.85 * prev_x_vp + 0.15 * x_meas).clamp(0.15, 0.85);
+    let y_vp = (0.85 * prev_y_vp + 0.15 * y_meas).clamp(0.48, 0.58);
+    let theta_bank = ((m_left + m_right) * 0.5).atan();
+    (x_vp, y_vp, theta_bank)
+}
+
+/// Evaluates Phase 8 cyan curved road boundary `x(y)` converging cleanly at `(x_vp, y_vp)`.
+pub fn eval_cyan_road_boundary(
+    y: f32,
+    x_vp: f32,
+    y_vp: f32,
+    y_bot: f32,
+    x_bot: f32,
+    kappa_road: f32,
+) -> f32 {
+    let span = (y_bot - y_vp).max(0.05);
+    let t = ((y - y_vp) / span).clamp(0.0, 1.0);
+    x_vp + (x_bot - x_vp) * t.powf(1.3) + kappa_road * (std::f32::consts::PI * t).sin()
+}
+
+/// Computes Phase 8 "Green Carpet" left/right edges `(carpet_left, carpet_right)` at row `y`,
+/// tapering with exponent 1.4 from `w_near` at `y_bot` to `w_far` at `y_vp` while weaving toward `target_gap_x`.
+#[allow(clippy::too_many_arguments)]
+pub fn compute_carpet_bounds(
+    y: f32,
+    _x_vp: f32,
+    y_vp: f32,
+    y_bot: f32,
+    x_ego: f32,
+    target_gap_x: f32,
+    kappa_steer: f32,
+    w_near: f32,
+    w_far: f32,
+) -> (f32, f32) {
+    let span = (y_bot - y_vp).max(0.05);
+    let t = ((y - y_vp) / span).clamp(0.0, 1.0);
+    let forward = 1.0 - t;
+    let width = w_far + (w_near - w_far) * t.powf(1.4);
+    let half_w = 0.5 * width;
+    let x_path = x_ego + (target_gap_x - x_ego) * forward + kappa_steer * forward * forward;
+    (x_path - half_w, x_path + half_w)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,5 +331,59 @@ mod tests {
         let y_10m = inverse_perspective_y_for_distance(10.0, 0.54, 2.0, 30.0);
         let y_15m = inverse_perspective_y_for_distance(15.0, 0.54, 2.0, 30.0);
         assert!(y_5m > y_10m && y_10m > y_15m && y_15m > 0.54);
+    }
+
+    #[test]
+    fn t_8_1_1_vanishing_point_tilting_horizon_and_cyan_boundaries_converge() {
+        // Left boundary: x(0.54) = 0.50, x(0.88) = 0.16 -> m_left = -1.0, c_left = 1.04
+        // Right boundary: x(0.54) = 0.50, x(0.88) = 0.84 -> m_right = 1.0, c_right = -0.04
+        let (x_vp, y_vp, theta_bank) =
+            compute_vanishing_point_and_bank(-1.0, 1.04, 1.0, -0.04, 0.50, 0.54);
+        assert!((x_vp - 0.50).abs() < 1e-4);
+        assert!((y_vp - 0.54).abs() < 1e-4);
+        assert!(y_vp >= 0.48 && y_vp <= 0.58);
+        assert!(theta_bank.abs() < 1e-4);
+
+        // Tilted boundaries & temporal smoothing (0.85 * prev + 0.15 * meas)
+        // Intersection at y_meas = 0.50, x_meas = 0.45, banking slope = (-0.8 + 1.2)/2 = 0.2
+        let (x_vp_s, y_vp_s, theta_s) =
+            compute_vanishing_point_and_bank(-0.8, 0.85, 1.2, -0.15, 0.50, 0.54);
+        assert!((x_vp_s - (0.85 * 0.50 + 0.15 * 0.45)).abs() < 1e-3);
+        assert!((y_vp_s - (0.85 * 0.54 + 0.15 * 0.50)).abs() < 1e-3);
+        assert!((theta_s - 0.2f32.atan()).abs() < 1e-4);
+
+        // Extreme intersection clamps y_vp inside [0.48, 0.58]
+        let (_, y_clamped, _) =
+            compute_vanishing_point_and_bank(-1.0, 0.70, 1.0, 0.10, 0.50, 0.48);
+        assert!(y_clamped >= 0.48 && y_clamped <= 0.58);
+
+        // Cyan curved road boundaries converge at (x_vp, y_vp) and never cross
+        let xl_top = eval_cyan_road_boundary(0.54, 0.50, 0.54, 0.88, 0.12, 0.05);
+        let xr_top = eval_cyan_road_boundary(0.54, 0.50, 0.54, 0.88, 0.88, 0.05);
+        assert!((xl_top - 0.50).abs() < 1e-5);
+        assert!((xr_top - 0.50).abs() < 1e-5);
+
+        let xl_bot = eval_cyan_road_boundary(0.88, 0.50, 0.54, 0.88, 0.12, 0.05);
+        let xr_bot = eval_cyan_road_boundary(0.88, 0.50, 0.54, 0.88, 0.88, 0.05);
+        assert!((xl_bot - 0.12).abs() < 1e-5);
+        assert!((xr_bot - 0.88).abs() < 1e-5);
+
+        for step in 1..=10 {
+            let y = 0.54 + (0.88 - 0.54) * (step as f32 / 10.0);
+            let xl = eval_cyan_road_boundary(y, 0.50, 0.54, 0.88, 0.12, 0.08);
+            let xr = eval_cyan_road_boundary(y, 0.50, 0.54, 0.88, 0.88, 0.08);
+            assert!(xl < xr);
+        }
+
+        // Green carpet width tapers with exponent 1.4 and weaves toward target_gap_x
+        let (cl_bot, cr_bot) =
+            compute_carpet_bounds(0.88, 0.50, 0.54, 0.88, 0.50, 0.62, 0.0, 0.18, 0.02);
+        assert!(((cr_bot - cl_bot) - 0.18).abs() < 1e-4);
+        assert!((((cl_bot + cr_bot) * 0.5) - 0.50).abs() < 1e-4);
+
+        let (cl_top, cr_top) =
+            compute_carpet_bounds(0.54, 0.50, 0.54, 0.88, 0.50, 0.62, 0.0, 0.18, 0.02);
+        assert!(((cr_top - cl_top) - 0.02).abs() < 1e-4);
+        assert!(((cl_top + cr_top) * 0.5) > 0.58);
     }
 }

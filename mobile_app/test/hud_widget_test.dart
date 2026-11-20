@@ -115,4 +115,58 @@ void main() {
     expect(find.byKey(const Key('critical_hazard_banner')), findsOneWidget);
     expect(find.textContaining('POTHOLE IN PATH: 6.4m'), findsOneWidget);
   });
+
+  testWidgets('T-8.2.1: Phase 8 HUD renders Green Carpet trajectory and triggers collision warning banner when obstacle < 8m', (tester) async {
+    // 1. Clear path -> solid translucent green carpet (#00E676 at 38% opacity) and no collision banner
+    const distantPothole = PotholeHazard(
+      xMin: 0.45,
+      yMin: 0.58,
+      xMax: 0.53,
+      yMax: 0.63,
+      confidence: 0.90,
+      distanceMeters: 14.0,
+      severityScore: 4.5,
+      lane: 'CENTER',
+      classId: 0,
+      inTrajectoryPath: true,
+    );
+
+    await tester.pumpWidget(
+      const MotorbikePotholeHudApp(
+        initialHazards: [distantPothole],
+        initialQueuedCount: 0,
+      ),
+    );
+    expect(find.byKey(const Key('critical_hazard_banner')), findsNothing);
+    final safePaint = tester.widget<CustomPaint>(find.byKey(const Key('hud_canvas')));
+    final safePainter = safePaint.painter! as TacticalHudPainter;
+    expect(safePainter.activeCarpetColor.toARGB32(), const Color(0xFF00E676).toARGB32());
+    expect(safePainter.activeCarpetFillColor.a, closeTo(0.38, 0.02));
+
+    // 2. Unavoidable obstacle < 8m -> crimson carpet (#FF1744) + BRAKE / COLLISION HAZARD banner
+    const imminentHazard = PotholeHazard(
+      xMin: 0.44,
+      yMin: 0.74,
+      xMax: 0.56,
+      yMax: 0.84,
+      confidence: 0.94,
+      distanceMeters: 5.2,
+      severityScore: 8.8,
+      lane: 'CENTER',
+      classId: 0,
+      inTrajectoryPath: true,
+    );
+
+    await tester.pumpWidget(
+      const MotorbikePotholeHudApp(
+        initialHazards: [imminentHazard],
+        initialQueuedCount: 1,
+      ),
+    );
+    expect(find.byKey(const Key('critical_hazard_banner')), findsOneWidget);
+    expect(find.textContaining('BRAKE / COLLISION HAZARD'), findsOneWidget);
+    final dangerPaint = tester.widget<CustomPaint>(find.byKey(const Key('hud_canvas')));
+    final dangerPainter = dangerPaint.painter! as TacticalHudPainter;
+    expect(dangerPainter.activeCarpetColor.toARGB32(), const Color(0xFFFF1744).toARGB32());
+  });
 }

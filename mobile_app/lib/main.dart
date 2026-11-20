@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
@@ -450,7 +451,9 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
                         ],
                       ),
                       child: Text(
-                        '⚠️ POTHOLE IN PATH: ${_inPathCriticalPothole!.distanceMeters.toStringAsFixed(1)}m',
+                        _inPathCriticalPothole!.distanceMeters < 8.0
+                            ? '⚠️ BRAKE / COLLISION HAZARD: ${_inPathCriticalPothole!.distanceMeters.toStringAsFixed(1)}m • POTHOLE IN PATH: ${_inPathCriticalPothole!.distanceMeters.toStringAsFixed(1)}m'
+                            : '⚠️ POTHOLE IN PATH: ${_inPathCriticalPothole!.distanceMeters.toStringAsFixed(1)}m',
                         style: const TextStyle(
                           color: Colors.white,
                           fontWeight: FontWeight.w900,
@@ -650,89 +653,151 @@ class TacticalHudPainter extends CustomPainter {
   final List<PotholeHazard> hazards;
   final double animStep;
   final bool hasCamera;
+  final double xVpNorm;
+  final double yVpNorm;
+  final double bankAngleRad;
+  final double xLeftBotNorm;
+  final double xRightBotNorm;
+  final double kappaRoad;
+  final double targetGapXNorm;
+  final double kappaSteer;
 
   TacticalHudPainter({
     required this.hazards,
     this.animStep = 0.0,
     this.hasCamera = false,
+    this.xVpNorm = 0.50,
+    this.yVpNorm = 0.54,
+    this.bankAngleRad = 0.0,
+    this.xLeftBotNorm = 0.12,
+    this.xRightBotNorm = 0.88,
+    this.kappaRoad = 0.0,
+    this.targetGapXNorm = 0.50,
+    this.kappaSteer = 0.0,
   });
+
+  bool get isCriticalCollision => hazards.any(
+        (h) => h.hazardType == 'pothole' && h.inTrajectoryPath && h.distanceMeters < 8.0,
+      );
+
+  Color get activeCarpetColor =>
+      isCriticalCollision ? const Color(0xFFFF1744) : const Color(0xFF00E676);
+
+  Color get activeCarpetFillColor => activeCarpetColor.withValues(alpha: 0.38);
 
   @override
   void paint(Canvas canvas, Size size) {
     final width = size.width;
     final height = size.height;
-    // Phase 6: Calibrate horizon strictly to physical road-level horizon (54% down frame)
-    final horizonY = height * 0.54;
-    final bottomY = height * 0.85;
+    final vpX = xVpNorm * width;
+    final vpY = yVpNorm * height;
+    const bottomNorm = 0.88;
 
     // 1. Synthetic Perspective Road Surface (if camera feed is not running)
     if (!hasCamera) {
       final skyPaint = Paint()..color = const Color(0xFF090F1C);
-      canvas.drawRect(Rect.fromLTWH(0, 0, width, horizonY), skyPaint);
+      canvas.drawRect(Rect.fromLTWH(0, 0, width, vpY), skyPaint);
 
       final asphaltPaint = Paint()..color = const Color(0xFF060B14);
-      canvas.drawRect(Rect.fromLTWH(0, horizonY, width, height - horizonY), asphaltPaint);
+      canvas.drawRect(Rect.fromLTWH(0, vpY, width, height - vpY), asphaltPaint);
     }
 
-    // 2. Road-Level Horizon Line (54% Calibration Mark)
+    // 2. Phase 8 Green Tilting Horizon Line (#00E676, centered at vanishing point)
+    final horizonHalfSpan = width * 0.55;
+    final dxH = horizonHalfSpan * math.cos(bankAngleRad);
+    final dyH = horizonHalfSpan * math.sin(bankAngleRad);
     final horizonPaint = Paint()
-      ..color = const Color(0x5500E5FF)
-      ..strokeWidth = 1.2;
-    canvas.drawLine(Offset(0, horizonY), Offset(width, horizonY), horizonPaint);
+      ..color = const Color(0xFF00E676)
+      ..strokeWidth = 2.0;
+    canvas.drawLine(Offset(vpX - dxH, vpY - dyH), Offset(vpX + dxH, vpY + dyH), horizonPaint);
 
-    // 3. Dynamic 2nd-Degree Curved Road Boundaries
-    final leftBoundary = Path()
-      ..moveTo(width * 0.39, horizonY)
-      ..quadraticBezierTo(width * 0.25, height * 0.70, width * 0.08, bottomY);
-    final rightBoundary = Path()
-      ..moveTo(width * 0.61, horizonY)
-      ..quadraticBezierTo(width * 0.75, height * 0.70, width * 0.92, bottomY);
+    // 3. Phase 8 Cyan Curved Road Boundaries (#00E5FF) converging at (x_vp, y_vp)
+    final leftBoundary = Path();
+    final rightBoundary = Path();
+    const steps = 24;
+    for (var i = 0; i <= steps; i++) {
+      final t = i / steps;
+      final yn = yVpNorm + (bottomNorm - yVpNorm) * t;
+      final curveBias = kappaRoad * math.sin(math.pi * t);
+      final xl = (xVpNorm + (xLeftBotNorm - xVpNorm) * math.pow(t, 1.3) + curveBias) * width;
+      final xr = (xVpNorm + (xRightBotNorm - xVpNorm) * math.pow(t, 1.3) + curveBias) * width;
+      final py = yn * height;
+      if (i == 0) {
+        leftBoundary.moveTo(xl, py);
+        rightBoundary.moveTo(xr, py);
+      } else {
+        leftBoundary.lineTo(xl, py);
+        rightBoundary.lineTo(xr, py);
+      }
+    }
 
     final curbPaint = Paint()
-      ..color = const Color(0xCC00E5FF)
+      ..color = const Color(0xFF00E5FF)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.5;
+      ..strokeWidth = 2.0;
     canvas.drawPath(leftBoundary, curbPaint);
     canvas.drawPath(rightBoundary, curbPaint);
 
-    // 4. Dynamic Vehicle Trajectory Guidance (Car Backup-Camera Style with 5m, 10m, 15m ticks)
-    final hasInPathCollision = hazards.any(
-      (h) => h.hazardType == 'pothole' && h.inTrajectoryPath && h.distanceMeters < 10.0,
-    );
-    final trajColor = hasInPathCollision ? const Color(0xFFFF1744) : const Color(0xCC00E676);
-    final trajPaint = Paint()
-      ..color = trajColor
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = hasInPathCollision ? 3.0 : 2.0;
-
-    final leftTrack = Path()
-      ..moveTo(width * 0.47, horizonY)
-      ..quadraticBezierTo(width * 0.44, height * 0.70, width * 0.39, bottomY);
-    final rightTrack = Path()
-      ..moveTo(width * 0.53, horizonY)
-      ..quadraticBezierTo(width * 0.56, height * 0.70, width * 0.61, bottomY);
-    canvas.drawPath(leftTrack, trajPaint);
-    canvas.drawPath(rightTrack, trajPaint);
-
-    // Horizontal distance rungs at 15m, 10m, 5m
-    for (final tickYRatio in [0.62, 0.70, 0.78]) {
-      final ty = height * tickYRatio;
-      final prog = (ty - horizonY) / (bottomY - horizonY);
-      final halfW = width * (0.03 + 0.08 * prog);
-      canvas.drawLine(
-        Offset(width * 0.50 - halfW, ty),
-        Offset(width * 0.50 + halfW, ty),
-        trajPaint,
-      );
+    // 4. Phase 8 Solid Translucent "Green Carpet" Optimal Trajectory Ribbon
+    double yTargetNorm = (yVpNorm + 0.02).clamp(0.48, bottomNorm - 0.04);
+    for (final h in hazards) {
+      if (h.inTrajectoryPath && h.yMax > yVpNorm && h.yMax < bottomNorm) {
+        final obsStop = (h.yMax + 0.01).clamp(yVpNorm + 0.03, bottomNorm - 0.04);
+        if (obsStop > yTargetNorm) {
+          yTargetNorm = obsStop;
+        }
+      }
     }
 
-    // 5. Collision Path Intersect Warning vs Unobtrusive Out-of-Path Dots
+    final carpetLeftPts = <Offset>[];
+    final carpetRightPts = <Offset>[];
+    final spanNorm = math.max(0.05, bottomNorm - yVpNorm);
+    const wNear = 0.18;
+    const wFar = 0.02;
+
+    for (var i = 0; i <= steps; i++) {
+      final yn = bottomNorm - (bottomNorm - yTargetNorm) * (i / steps);
+      final t = ((yn - yVpNorm) / spanNorm).clamp(0.0, 1.0);
+      final forward = 1.0 - t;
+      final wAtY = wFar + (wNear - wFar) * math.pow(t, 1.4);
+      final xCenter = 0.50 + (targetGapXNorm - 0.50) * forward + kappaSteer * forward * forward;
+      carpetLeftPts.add(Offset((xCenter - wAtY * 0.5) * width, yn * height));
+      carpetRightPts.add(Offset((xCenter + wAtY * 0.5) * width, yn * height));
+    }
+
+    final carpetPolygon = Path()..moveTo(carpetLeftPts.first.dx, carpetLeftPts.first.dy);
+    for (var i = 1; i < carpetLeftPts.length; i++) {
+      carpetPolygon.lineTo(carpetLeftPts[i].dx, carpetLeftPts[i].dy);
+    }
+    for (var i = carpetRightPts.length - 1; i >= 0; i--) {
+      carpetPolygon.lineTo(carpetRightPts[i].dx, carpetRightPts[i].dy);
+    }
+    carpetPolygon.close();
+
+    final carpetFillPaint = Paint()
+      ..color = activeCarpetFillColor
+      ..style = PaintingStyle.fill;
+    canvas.drawPath(carpetPolygon, carpetFillPaint);
+
+    final carpetBorderPaint = Paint()
+      ..color = activeCarpetColor
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.0;
+    final leftBorder = Path()..moveTo(carpetLeftPts.first.dx, carpetLeftPts.first.dy);
+    final rightBorder = Path()..moveTo(carpetRightPts.first.dx, carpetRightPts.first.dy);
+    for (var i = 1; i < carpetLeftPts.length; i++) {
+      leftBorder.lineTo(carpetLeftPts[i].dx, carpetLeftPts[i].dy);
+      rightBorder.lineTo(carpetRightPts[i].dx, carpetRightPts[i].dy);
+    }
+    canvas.drawPath(leftBorder, carpetBorderPaint);
+    canvas.drawPath(rightBorder, carpetBorderPaint);
+
+    // 5. Hazard Markers (unobtrusive dots outside path vs crimson reticle in path)
     for (final h in hazards) {
       final cx = ((h.xMin + h.xMax) * 0.5) * width;
       final cy = ((h.yMin + h.yMax) * 0.5) * height;
 
       if (!h.inTrajectoryPath) {
-        // Safe (outside trajectory path): faint, unobtrusive dot marker only
         final dotPaint = Paint()..color = const Color(0x8800E5FF);
         canvas.drawCircle(Offset(cx, cy), 4.0, dotPaint);
         continue;
@@ -755,7 +820,6 @@ class TacticalHudPainter extends CustomPainter {
       canvas.drawRect(rect, boxPaint);
 
       if (isCritical) {
-        // Impact target reticle
         canvas.drawCircle(Offset(cx, cy), 10.0, boxPaint);
       }
 

@@ -246,4 +246,85 @@ def test_t_ux_8_phase6_curved_road_boundaries_and_offroad_clutter_rejection():
     assert code_in_path == 2
 
 
+def test_t_ux_9_phase8_green_carpet_tilting_horizon_and_obstacle_weaving():
+    """Verify Phase 8 vanishing point, tilting horizon, converging cyan boundaries, and obstacle-weaving green carpet."""
+    import cv2
+    import numpy as np
+    from video_evaluator.server import (
+        compute_phase8_horizon_and_boundaries,
+        compute_phase8_green_carpet_polygon,
+    )
+
+    # Synthetic 360x640 road scene: sky above y=0.52 (187px), gray asphalt converging at (0.50, 0.52)
+    frame = np.full((360, 640, 3), (40, 95, 50), dtype=np.uint8)
+    frame[:187, :] = (190, 175, 155)
+    road_pts = np.array([[280, 187], [360, 187], [580, 324], [60, 324]], dtype=np.int32)
+    cv2.fillPoly(frame, [road_pts], (115, 115, 118))
+
+    x_vp, y_vp, theta_bank, x_left_bot, x_right_bot, kappa_road = compute_phase8_horizon_and_boundaries(
+        frame, prev_vp=(0.50, 0.54)
+    )
+    assert 0.15 <= x_vp <= 0.85
+    assert 0.48 <= y_vp <= 0.58
+    assert -0.40 <= theta_bank <= 0.40
+    assert 0.02 <= x_left_bot < x_right_bot <= 0.98
+
+    # Clear path: carpet extends all the way to near y_vp + 0.02 and boundaries never cross
+    clear_res = compute_phase8_green_carpet_polygon(
+        frame, x_vp, y_vp, x_left_bot, x_right_bot, kappa_road, detections=[]
+    )
+    assert clear_res["y_target_norm"] <= y_vp + 0.04
+    assert clear_res["is_critical_collision"] is False
+    for lx, rx in zip(clear_res["left_bound_xs"], clear_res["right_bound_xs"]):
+        assert lx <= rx
+
+    # Obstacle on left-center (x=[0.36, 0.52], y_max=0.68): carpet must weave right & stop before obstacle
+    obs_detections = [
+        {
+            "x_min": 0.36,
+            "y_min": 0.56,
+            "x_max": 0.52,
+            "y_max": 0.68,
+            "distance_m": 9.5,
+            "confidence": 0.88,
+            "class_id": 1,
+            "in_path": True,
+        }
+    ]
+    weave_res = compute_phase8_green_carpet_polygon(
+        frame, x_vp, y_vp, x_left_bot, x_right_bot, kappa_road, detections=obs_detections
+    )
+    assert weave_res["target_gap_x"] > 0.50
+    # Carpet centerline shifts right toward open gap without leaving cyan boundaries
+    far_center_x = 0.5 * (weave_res["carpet_left_xs"][-1] + weave_res["carpet_right_xs"][-1])
+    assert far_center_x > 0.50
+    for cl, cr, xl, xr in zip(
+        weave_res["carpet_left_xs"],
+        weave_res["carpet_right_xs"],
+        weave_res["carpet_bound_left_xs"],
+        weave_res["carpet_bound_right_xs"],
+    ):
+        assert xl <= cl <= cr <= xr
+
+    # Imminent unavoidable obstacle directly ahead (< 8.0m) -> truncated at y_obs and critical flag True
+    imminent_obs = [
+        {
+            "x_min": 0.38,
+            "y_min": 0.62,
+            "x_max": 0.62,
+            "y_max": 0.76,
+            "distance_m": 5.5,
+            "confidence": 0.92,
+            "class_id": 0,
+            "in_path": True,
+        }
+    ]
+    crit_res = compute_phase8_green_carpet_polygon(
+        frame, x_vp, y_vp, x_left_bot, x_right_bot, kappa_road, detections=imminent_obs
+    )
+    assert crit_res["is_critical_collision"] is True
+    assert crit_res["y_target_norm"] >= max(0.76, y_vp + 0.03) - 1e-3
+
+
+
 
