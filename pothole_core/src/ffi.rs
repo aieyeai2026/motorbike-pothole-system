@@ -1,4 +1,4 @@
-use crate::geometry::Lane;
+use crate::geometry::{compute_lane_centering, CenteringStatus, Lane};
 use crate::inference::run_yolo_postprocess;
 use std::slice;
 
@@ -13,6 +13,42 @@ pub struct CDetectedPothole {
     pub distance_meters: f32,
     pub severity_score: f32,
     pub lane_code: i32,
+    pub class_id: i32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CLaneCentering {
+    pub offset_meters: f32,
+    pub dist_left_m: f32,
+    pub dist_right_m: f32,
+    pub status_code: i32,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pothole_core_compute_lane_centering(
+    x_ego: f32,
+    x_left_border: f32,
+    x_right_border: f32,
+    road_width_m: f32,
+    out_ptr: *mut CLaneCentering,
+) -> i32 {
+    if out_ptr.is_null() {
+        return -1;
+    }
+    let res = compute_lane_centering(x_ego, x_left_border, x_right_border, road_width_m);
+    let status_code = match res.status {
+        CenteringStatus::Centered => 0,
+        CenteringStatus::DriftingLeft => 1,
+        CenteringStatus::DriftingRight => 2,
+    };
+    *out_ptr = CLaneCentering {
+        offset_meters: res.offset_meters,
+        dist_left_m: res.dist_left_m,
+        dist_right_m: res.dist_right_m,
+        status_code,
+    };
+    0
 }
 
 #[no_mangle]
@@ -64,6 +100,7 @@ pub unsafe extern "C" fn pothole_core_run_postprocess(
             distance_meters: d.distance_meters,
             severity_score: d.severity_score,
             lane_code,
+            class_id: d.class_id,
         };
     }
 
@@ -87,7 +124,7 @@ mod tests {
         let mut out = vec![
             CDetectedPothole {
                 x_min: 0.0, y_min: 0.0, x_max: 0.0, y_max: 0.0,
-                confidence: 0.0, distance_meters: 0.0, severity_score: 0.0, lane_code: -1,
+                confidence: 0.0, distance_meters: 0.0, severity_score: 0.0, lane_code: -1, class_id: -1,
             };
             5
         ];
@@ -112,5 +149,22 @@ mod tests {
         assert!((out[0].confidence - 0.91).abs() < 1e-5);
         assert!(out[0].distance_meters >= 2.0);
         assert!(out[0].severity_score > 0.0);
+    }
+
+    #[test]
+    fn t_4_1_2_c_ffi_exports_class_id_and_lane_centering() {
+        let mut centering = CLaneCentering {
+            offset_meters: 0.0,
+            dist_left_m: 0.0,
+            dist_right_m: 0.0,
+            status_code: -1,
+        };
+        let rc = unsafe {
+            pothole_core_compute_lane_centering(0.20, 0.0, 1.0, 3.6, &mut centering as *mut CLaneCentering)
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(centering.status_code, 1); // 1 = DRIFTING_LEFT
+        assert!(centering.offset_meters < -0.25);
+        assert!((centering.dist_left_m - 0.72).abs() < 1e-3);
     }
 }

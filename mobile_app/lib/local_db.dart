@@ -12,6 +12,7 @@ class PendingPotholeRecord {
   final double confidence;
   final double severityScore;
   final String lanePosition;
+  final String hazardType;
   final String capturedAt;
   final String? imageBase64;
 
@@ -23,6 +24,7 @@ class PendingPotholeRecord {
     required this.confidence,
     required this.severityScore,
     required this.lanePosition,
+    this.hazardType = 'pothole',
     required this.capturedAt,
     this.imageBase64,
   });
@@ -35,6 +37,7 @@ class PendingPotholeRecord {
         'confidence': confidence,
         'severity_score': severityScore,
         'lane_position': lanePosition,
+        'hazard_type': hazardType,
         'captured_at': capturedAt,
         'image_base64': imageBase64,
       };
@@ -48,6 +51,7 @@ class PendingPotholeRecord {
       confidence: (map['confidence'] as num).toDouble(),
       severityScore: (map['severity_score'] as num).toDouble(),
       lanePosition: map['lane_position'] as String,
+      hazardType: (map['hazard_type'] as String?) ?? 'pothole',
       capturedAt: map['captured_at'] as String,
       imageBase64: map['image_base64'] as String?,
     );
@@ -68,7 +72,7 @@ class LocalHazardQueue {
     final database = await dbFactory.openDatabase(
       dbPath,
       options: OpenDatabaseOptions(
-        version: 1,
+        version: 2,
         onCreate: (db, version) async {
           await db.execute('''
             CREATE TABLE $tableName (
@@ -79,10 +83,18 @@ class LocalHazardQueue {
               confidence REAL NOT NULL,
               severity_score REAL NOT NULL,
               lane_position TEXT NOT NULL,
+              hazard_type TEXT NOT NULL DEFAULT 'pothole',
               captured_at TEXT NOT NULL,
               image_base64 TEXT
             )
           ''');
+        },
+        onUpgrade: (db, oldVersion, newVersion) async {
+          if (oldVersion < 2) {
+            await db.execute(
+              "ALTER TABLE $tableName ADD COLUMN hazard_type TEXT NOT NULL DEFAULT 'pothole'",
+            );
+          }
         },
       ),
     );
@@ -109,9 +121,13 @@ class LocalHazardQueue {
     required double confidence,
     required double severityScore,
     required String lanePosition,
+    String hazardType = 'pothole',
     String? imageBase64,
     String? customUuid,
   }) async {
+    if (hazardType == 'car') {
+      return false;
+    }
     final existing = await getAllPending();
     final isDuplicate = existing.any((item) =>
         haversineMeters(latitude, longitude, item.latitude, item.longitude) <
@@ -129,6 +145,7 @@ class LocalHazardQueue {
       confidence: confidence,
       severityScore: severityScore,
       lanePosition: lanePosition,
+      hazardType: hazardType,
       capturedAt: DateTime.now().toUtc().toIso8601String(),
       imageBase64: imageBase64,
     );

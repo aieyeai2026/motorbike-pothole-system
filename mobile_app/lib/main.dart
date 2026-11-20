@@ -76,9 +76,7 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
   double _currentHeadingDeg = 0.0;
   double _currentZAccelG = 1.0;
   double _imuZPeakG = 1.0;
-  double _rollRateDegS = 0.0;
   bool _gpsLocked = false;
-  bool _imuActive = false;
 
   List<PotholeHazard> _activeHazards = [];
   int _queuedCount = 0;
@@ -86,7 +84,6 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
   double _simStep = 0.0;
   bool _cameraReady = false;
   late String _backendUrl;
-  String _syncStatusMessage = '';
 
   @override
   void initState() {
@@ -174,13 +171,10 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
           _imuZPeakG = (_imuZPeakG * 0.94) + (1.0 * 0.06);
         }
         _currentZAccelG = shockG;
-        _imuActive = true;
         if (mounted) setState(() {});
       });
 
-      _gyroSub = gyroscopeEventStream().listen((GyroscopeEvent event) {
-        _rollRateDegS = event.x * 180.0 / 3.14159265;
-      });
+      _gyroSub = gyroscopeEventStream().listen((GyroscopeEvent _) {});
     } catch (_) {}
 
     // 5. Initialize SQLite Offline Queue
@@ -262,6 +256,7 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
             confidence: top.confidence,
             severityScore: top.severityScore,
             lanePosition: top.lane,
+            hazardType: top.hazardType,
           );
           if (inserted) {
             final all = await _localQueue!.getAllPending();
@@ -286,8 +281,8 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
     super.dispose();
   }
 
-  bool get _hasCriticalAlert =>
-      _activeHazards.any((h) => h.distanceMeters < 8.0 && h.confidence >= 0.75);
+  bool get _hasCriticalAlert => _activeHazards.any(
+      (h) => h.hazardType == 'pothole' && h.distanceMeters < 8.0 && h.confidence >= 0.75);
 
   void _showBackendSettingsDialog() {
     final controller = TextEditingController(text: _backendUrl);
@@ -456,7 +451,6 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
                           if (mounted) {
                             setState(() {
                               _queuedCount = remaining.length;
-                              _syncStatusMessage = 'Synced $synced items to $_backendUrl';
                             });
                             ScaffoldMessenger.of(context).showSnackBar(
                               SnackBar(

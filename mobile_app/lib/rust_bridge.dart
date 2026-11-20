@@ -26,6 +26,66 @@ final class CDetectedPothole extends ffi.Struct {
 
   @ffi.Int32()
   external int laneCode;
+
+  @ffi.Int32()
+  external int classId;
+}
+
+final class CLaneCentering extends ffi.Struct {
+  @ffi.Float()
+  external double offsetMeters;
+
+  @ffi.Float()
+  external double distLeftM;
+
+  @ffi.Float()
+  external double distRightM;
+
+  @ffi.Int32()
+  external int statusCode;
+}
+
+typedef _ComputeLaneCenteringNative = ffi.Int32 Function(
+  ffi.Float xEgo,
+  ffi.Float xLeftBorder,
+  ffi.Float xRightBorder,
+  ffi.Float roadWidthM,
+  ffi.Pointer<CLaneCentering> outPtr,
+);
+
+typedef _ComputeLaneCenteringDart = int Function(
+  double xEgo,
+  double xLeftBorder,
+  double xRightBorder,
+  double roadWidthM,
+  ffi.Pointer<CLaneCentering> outPtr,
+);
+
+class LaneCenteringResult {
+  final double offsetMeters;
+  final double distLeftM;
+  final double distRightM;
+  final String status;
+
+  const LaneCenteringResult({
+    required this.offsetMeters,
+    required this.distLeftM,
+    required this.distRightM,
+    required this.status,
+  });
+
+  static String statusFromCode(int code) {
+    switch (code) {
+      case 0:
+        return 'CENTERED';
+      case 1:
+        return 'DRIFTING_LEFT';
+      case 2:
+        return 'DRIFTING_RIGHT';
+      default:
+        return 'CENTERED';
+    }
+  }
 }
 
 typedef _RunPostprocessNative = ffi.Size Function(
@@ -63,6 +123,7 @@ class PotholeHazard {
   final double distanceMeters;
   final double severityScore;
   final String lane;
+  final int classId;
 
   const PotholeHazard({
     required this.xMin,
@@ -73,7 +134,21 @@ class PotholeHazard {
     required this.distanceMeters,
     required this.severityScore,
     required this.lane,
+    this.classId = 0,
   });
+
+  String get hazardType {
+    switch (classId) {
+      case 0:
+        return 'pothole';
+      case 1:
+        return 'car';
+      case 2:
+        return 'debris';
+      default:
+        return 'pothole';
+    }
+  }
 
   static String laneFromCode(int code) {
     switch (code) {
@@ -92,6 +167,7 @@ class PotholeHazard {
 class RustPotholeBridge {
   late final ffi.DynamicLibrary _lib;
   late final _RunPostprocessDart _runPostprocess;
+  late final _ComputeLaneCenteringDart _computeLaneCentering;
 
   RustPotholeBridge({String? overrideLibraryPath}) {
     _lib = _openLibrary(overrideLibraryPath);
@@ -100,6 +176,32 @@ class RustPotholeBridge {
           'pothole_core_run_postprocess',
         )
         .asFunction<_RunPostprocessDart>();
+    _computeLaneCentering = _lib
+        .lookup<ffi.NativeFunction<_ComputeLaneCenteringNative>>(
+          'pothole_core_compute_lane_centering',
+        )
+        .asFunction<_ComputeLaneCenteringDart>();
+  }
+
+  LaneCenteringResult computeLaneCentering({
+    required double xEgo,
+    required double xLeftBorder,
+    required double xRightBorder,
+    double roadWidthM = 3.6,
+  }) {
+    final outPtr = calloc<CLaneCentering>();
+    try {
+      _computeLaneCentering(xEgo, xLeftBorder, xRightBorder, roadWidthM, outPtr);
+      final ref = outPtr.ref;
+      return LaneCenteringResult(
+        offsetMeters: ref.offsetMeters,
+        distLeftM: ref.distLeftM,
+        distRightM: ref.distRightM,
+        status: LaneCenteringResult.statusFromCode(ref.statusCode),
+      );
+    } finally {
+      calloc.free(outPtr);
+    }
   }
 
   static ffi.DynamicLibrary _openLibrary(String? overridePath) {
@@ -165,6 +267,7 @@ class RustPotholeBridge {
             distanceMeters: item.distanceMeters,
             severityScore: item.severityScore,
             lane: PotholeHazard.laneFromCode(item.laneCode),
+            classId: item.classId,
           ),
         );
       }

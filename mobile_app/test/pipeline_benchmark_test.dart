@@ -74,7 +74,11 @@ void main() {
         final alertWatch = Stopwatch()..start();
         final hasCritical = hazards.any((h) => h.distanceMeters < 8.0 && h.confidence >= 0.75);
         alertWatch.stop();
-        alertDelays.add(alertWatch.elapsedMicroseconds / 1000.0);
+        if (hasCritical) {
+          alertDelays.add(alertWatch.elapsedMicroseconds / 1000.0);
+        } else {
+          alertDelays.add(alertWatch.elapsedMicroseconds / 1000.0);
+        }
 
         // 3. SQLite Insert & Deduplication
         if (hazards.isNotEmpty) {

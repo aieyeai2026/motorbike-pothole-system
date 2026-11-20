@@ -104,4 +104,48 @@ void main() {
     expect((await queue.getAllPending()).length, 1);
     await queue.db.close();
   });
+
+  test('T-4.3.1: LocalHazardQueue stores hazard_type (default pothole) and never queues car', () async {
+    final queue = await LocalHazardQueue.open(
+      inMemoryDatabasePath,
+      factory: databaseFactoryFfi,
+    );
+
+    final potholeQueued = await queue.enqueueIfNotDuplicate(
+      latitude: 9.931200,
+      longitude: 76.267300,
+      speedKmh: 40.0,
+      confidence: 0.90,
+      severityScore: 7.0,
+      lanePosition: 'CENTER',
+    );
+    final carQueued = await queue.enqueueIfNotDuplicate(
+      latitude: 9.932000,
+      longitude: 76.268000,
+      speedKmh: 40.0,
+      confidence: 0.95,
+      severityScore: 8.0,
+      lanePosition: 'CENTER',
+      hazardType: 'car',
+    );
+    final debrisQueued = await queue.enqueueIfNotDuplicate(
+      latitude: 9.933000,
+      longitude: 76.269000,
+      speedKmh: 38.0,
+      confidence: 0.85,
+      severityScore: 6.0,
+      lanePosition: 'LEFT',
+      hazardType: 'debris',
+    );
+
+    expect(potholeQueued, isTrue);
+    expect(carQueued, isFalse);
+    expect(debrisQueued, isTrue);
+
+    final pending = await queue.getAllPending();
+    expect(pending.length, 2);
+    expect(pending[0].hazardType, 'pothole');
+    expect(pending[1].hazardType, 'debris');
+    await queue.db.close();
+  });
 }
