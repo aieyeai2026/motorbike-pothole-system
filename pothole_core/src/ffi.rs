@@ -1,6 +1,7 @@
 use crate::geometry::{
-    compute_lane_centering, intersects_trajectory_corridor, is_point_in_drivable_corridor,
-    CenteringStatus, Lane, QuadraticCurve,
+    compute_carpet_bounds, compute_lane_centering, eval_cyan_road_boundary,
+    intersects_trajectory_corridor, is_point_in_drivable_corridor, CenteringStatus, Lane,
+    QuadraticCurve,
 };
 use crate::inference::run_yolo_postprocess;
 use std::slice;
@@ -105,6 +106,59 @@ pub unsafe extern "C" fn pothole_core_classify_hazard_corridor(
     } else {
         1
     }
+}
+
+/// Evaluates a single horizontal scanline `y` for Phase 8 cyan road boundaries and the
+/// green optimal trajectory carpet, clamping the carpet inside the road margins.
+/// Writes `[x_left_bound, x_right_bound, carpet_left, carpet_right]` into `out_quad_ptr`.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn pothole_core_eval_green_carpet_row(
+    y: f32,
+    x_vp: f32,
+    y_vp: f32,
+    y_bot: f32,
+    x_left_bot: f32,
+    x_right_bot: f32,
+    kappa_road: f32,
+    x_ego: f32,
+    target_gap_x: f32,
+    kappa_steer: f32,
+    w_near: f32,
+    w_far: f32,
+    out_quad_ptr: *mut f32,
+) -> i32 {
+    if out_quad_ptr.is_null() {
+        return -1;
+    }
+    let xl_bound = eval_cyan_road_boundary(y, x_vp, y_vp, y_bot, x_left_bot, kappa_road);
+    let xr_bound = eval_cyan_road_boundary(y, x_vp, y_vp, y_bot, x_right_bot, kappa_road);
+    let (mut cl, mut cr) = compute_carpet_bounds(
+        y, x_vp, y_vp, y_bot, x_ego, target_gap_x, kappa_steer, w_near, w_far,
+    );
+
+    // Clamp carpet inside road boundaries with a small margin when road width permits
+    let margin = 0.015f32.min(((xr_bound - xl_bound) * 0.15).max(0.0));
+    let safe_l = xl_bound + margin;
+    let safe_r = xr_bound - margin;
+    if safe_r > safe_l {
+        let width = (cr - cl).min(safe_r - safe_l);
+        if cl < safe_l {
+            cl = safe_l;
+            cr = cl + width;
+        }
+        if cr > safe_r {
+            cr = safe_r;
+            cl = cr - width;
+        }
+    }
+
+    let out = slice::from_raw_parts_mut(out_quad_ptr, 4);
+    out[0] = xl_bound;
+    out[1] = xr_bound;
+    out[2] = cl;
+    out[3] = cr;
+    0
 }
 
 #[no_mangle]
@@ -258,5 +312,39 @@ mod tests {
         assert_eq!(in_path, 2);
         assert_eq!(on_road_out_of_path, 1);
         assert_eq!(off_road, 0);
+    }
+
+    #[test]
+    fn t_8_1_2_c_ffi_green_carpet_tapers_and_weaves_around_obstacles() {
+        let mut out_bot = [0.0f32; 4];
+        let rc_bot = unsafe {
+            pothole_core_eval_green_carpet_row(
+                0.88, 0.50, 0.54, 0.88,
+                0.12, 0.88, 0.04,
+                0.50, 0.64, 0.0,
+                0.18, 0.02,
+                out_bot.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc_bot, 0);
+        assert!((out_bot[0] - 0.12).abs() < 1e-4);
+        assert!((out_bot[1] - 0.88).abs() < 1e-4);
+        assert!(((out_bot[3] - out_bot[2]) - 0.18).abs() < 1e-4);
+
+        let mut out_mid = [0.0f32; 4];
+        let rc_mid = unsafe {
+            pothole_core_eval_green_carpet_row(
+                0.68, 0.50, 0.54, 0.88,
+                0.12, 0.88, 0.04,
+                0.50, 0.64, 0.0,
+                0.18, 0.02,
+                out_mid.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc_mid, 0);
+        assert!(out_mid[0] < out_mid[2] && out_mid[3] < out_mid[1]);
+        assert!((out_mid[3] - out_mid[2]) < (out_bot[3] - out_bot[2]));
+        // Weaves right toward target_gap_x = 0.64
+        assert!(((out_mid[2] + out_mid[3]) * 0.5) > 0.50);
     }
 }
