@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
@@ -59,12 +60,14 @@ class PotholeHudScreen extends StatefulWidget {
 class _PotholeHudScreenState extends State<PotholeHudScreen> {
   RustPotholeBridge? _rustBridge;
   LocalHazardQueue? _localQueue;
+  CameraController? _cameraController;
   Timer? _simTimer;
 
   List<PotholeHazard> _activeHazards = [];
   int _queuedCount = 0;
   final bool _simMode = true;
   double _simStep = 0.0;
+  bool _cameraReady = false;
   late String _backendUrl;
   String _syncStatusMessage = '';
 
@@ -80,10 +83,32 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
   }
 
   Future<void> _initNativePipeline() async {
+    // 1. Initialize Rust C-FFI Bridge
     try {
       _rustBridge = RustPotholeBridge();
     } catch (_) {}
 
+    // 2. Initialize Camera Feed for Live View
+    try {
+      final cameras = await availableCameras();
+      if (cameras.isNotEmpty) {
+        final backCam = cameras.firstWhere(
+          (c) => c.lensDirection == CameraLensDirection.back,
+          orElse: () => cameras.first,
+        );
+        _cameraController = CameraController(
+          backCam,
+          ResolutionPreset.medium,
+          enableAudio: false,
+        );
+        await _cameraController!.initialize();
+        if (mounted) {
+          setState(() => _cameraReady = true);
+        }
+      }
+    } catch (_) {}
+
+    // 3. Initialize SQLite Offline Queue
     try {
       final dbFolder = await getDatabasesPath();
       _localQueue = await LocalHazardQueue.open(p.join(dbFolder, 'pothole_hud.db'));
@@ -93,29 +118,61 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
       }
     } catch (_) {}
 
+    // 4. Start HUD Animation & Detection Loop
     _startSimulationLoop();
   }
 
   void _startSimulationLoop() {
     _simTimer?.cancel();
-    _simTimer = Timer.periodic(const Duration(milliseconds: 120), (_) async {
-      if (!_simMode || _rustBridge == null) return;
-      _simStep = (_simStep + 12.0) % 220.0;
-      final cy = 320.0 + _simStep;
+    _simTimer = Timer.periodic(const Duration(milliseconds: 100), (_) async {
+      if (!_simMode) return;
+      _simStep = (_simStep + 10.0) % 240.0;
+      final cy = 300.0 + _simStep;
 
-      final simTensor = <double>[
-        320.0, 490.0,
-        cy,    390.0,
-        130.0, 95.0,
-        68.0,  52.0,
-        0.91,  0.82,
-      ];
+      List<PotholeHazard> detections;
+      if (_rustBridge != null) {
+        final simTensor = <double>[
+          320.0, 490.0,
+          cy,    390.0,
+          130.0, 95.0,
+          68.0,  52.0,
+          0.91,  0.82,
+        ];
+        detections = _rustBridge!.runYoloPostprocess(
+          tensor: simTensor,
+          numAnchors: 2,
+          imuZPeakG: 1.4,
+        );
+      } else {
+        // High-fidelity fallback simulated detection stream so HUD is active on all devices
+        final normY = (_simStep / 240.0);
+        final dist1 = 28.0 * (1.0 - normY) + 3.8;
+        final isCrit1 = dist1 < 8.0;
 
-      final detections = _rustBridge!.runYoloPostprocess(
-        tensor: simTensor,
-        numAnchors: 2,
-        imuZPeakG: 1.4,
-      );
+        detections = [
+          PotholeHazard(
+            xMin: 0.42,
+            yMin: (0.40 + normY * 0.44).clamp(0.0, 1.0),
+            xMax: 0.58,
+            yMax: (0.46 + normY * 0.48).clamp(0.0, 1.0),
+            confidence: 0.93,
+            distanceMeters: dist1,
+            severityScore: isCrit1 ? 8.8 : 6.5,
+            lane: 'CENTER',
+          ),
+          if (dist1 > 12.0)
+            const PotholeHazard(
+              xMin: 0.22,
+              yMin: 0.54,
+              xMax: 0.34,
+              yMax: 0.60,
+              confidence: 0.82,
+              distanceMeters: 16.2,
+              severityScore: 5.6,
+              lane: 'LEFT',
+            ),
+        ];
+      }
 
       if (_localQueue != null && detections.isNotEmpty) {
         final top = detections.first;
@@ -144,6 +201,7 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
   @override
   void dispose() {
     _simTimer?.cancel();
+    _cameraController?.dispose();
     super.dispose();
   }
 
@@ -218,15 +276,37 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final isPortrait = MediaQuery.of(context).orientation == Orientation.portrait;
+
     return Scaffold(
       body: SafeArea(
         child: Stack(
           fit: StackFit.expand,
           children: [
+            // 1. Live Camera Feed (if available)
+            if (_cameraReady && _cameraController != null && _cameraController!.value.isInitialized)
+              SizedBox.expand(
+                child: FittedBox(
+                  fit: BoxFit.cover,
+                  child: SizedBox(
+                    width: _cameraController!.value.previewSize?.height ?? 1280,
+                    height: _cameraController!.value.previewSize?.width ?? 720,
+                    child: CameraPreview(_cameraController!),
+                  ),
+                ),
+              ),
+
+            // 2. Tactical Perspective HUD Canvas Overlay
             CustomPaint(
               key: const Key('hud_canvas'),
-              painter: TacticalHudPainter(hazards: _activeHazards),
+              painter: TacticalHudPainter(
+                hazards: _activeHazards,
+                animStep: _simStep,
+                hasCamera: _cameraReady,
+              ),
             ),
+
+            // 3. Top Status Header & Telemetry Controls
             Positioned(
               top: 12,
               left: 16,
@@ -251,6 +331,7 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
                         color: Color(0xFF00E5FF),
                         fontWeight: FontWeight.bold,
                         fontSize: 13,
+                        fontFamily: 'monospace',
                       ),
                     ),
                   ),
@@ -261,13 +342,17 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
                       decoration: BoxDecoration(
                         color: const Color(0xFFFF1744),
                         borderRadius: BorderRadius.circular(10),
+                        boxShadow: const [
+                          BoxShadow(color: Color(0xAAFF1744), blurRadius: 12),
+                        ],
                       ),
                       child: const Text(
-                        'CRITICAL POTHOLE < 8M!',
+                        '⚠️ CRITICAL POTHOLE < 8M!',
                         style: TextStyle(
                           color: Colors.white,
                           fontWeight: FontWeight.w900,
                           fontSize: 14,
+                          letterSpacing: 1,
                         ),
                       ),
                     ),
@@ -284,7 +369,7 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
                           if (_localQueue == null) return;
                           final synced = await _localQueue!.flushBatchToBackend(
                             apiBaseUrl: _backendUrl,
-                            deviceId: 'android-bike-01',
+                            deviceId: 'iphone-bike-01',
                           );
                           final remaining = await _localQueue!.getAllPending();
                           if (mounted) {
@@ -307,6 +392,60 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
                 ],
               ),
             ),
+
+            // 4. Portrait Mode Guidance Banner
+            if (isPortrait)
+              Positioned(
+                top: 70,
+                left: 20,
+                right: 20,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 10),
+                  decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: Colors.white24),
+                  ),
+                  child: const Text(
+                    '🏍️ Rotate to Landscape for Handlebar Cockpit View',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.white70, fontSize: 11),
+                  ),
+                ),
+              ),
+
+            // 5. Road Centering & Ego Reticle Badge at Bottom Center
+            Positioned(
+              bottom: 16,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: const Color(0xDD070B12),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: const Color(0xFF00E5FF)),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text('L: 1.8m  ', style: TextStyle(color: Color(0xFF00E5FF), fontSize: 12, fontFamily: 'monospace')),
+                      Text(
+                        'CENTERED (0.0m)',
+                        style: TextStyle(
+                          color: Colors.black,
+                          backgroundColor: Color(0xFF00E676),
+                          fontWeight: FontWeight.bold,
+                          fontSize: 12,
+                        ),
+                      ),
+                      Text('  R: 1.8m', style: TextStyle(color: Color(0xFF00E5FF), fontSize: 12, fontFamily: 'monospace')),
+                    ],
+                  ),
+                ),
+              ),
+            ),
           ],
         ),
       ),
@@ -316,26 +455,97 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
 
 class TacticalHudPainter extends CustomPainter {
   final List<PotholeHazard> hazards;
+  final double animStep;
+  final bool hasCamera;
 
-  TacticalHudPainter({required this.hazards});
+  TacticalHudPainter({
+    required this.hazards,
+    this.animStep = 0.0,
+    this.hasCamera = false,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
-    final horizonY = size.height * 0.40;
-    final horizonPaint = Paint()
-      ..color = const Color(0x5500E5FF)
-      ..strokeWidth = 1.5;
-    canvas.drawLine(Offset(0, horizonY), Offset(size.width, horizonY), horizonPaint);
+    final width = size.width;
+    final height = size.height;
+    final horizonY = height * 0.40;
 
+    // 1. Synthetic Perspective Road Surface (if camera feed is not running)
+    if (!hasCamera) {
+      // Sky
+      final skyPaint = Paint()..color = const Color(0xFF090F1C);
+      canvas.drawRect(Rect.fromLTWH(0, 0, width, horizonY), skyPaint);
+
+      // Road Surface
+      final roadTopLeft = width * 0.42;
+      final roadTopRight = width * 0.58;
+      final roadPath = Path()
+        ..moveTo(roadTopLeft, horizonY)
+        ..lineTo(roadTopRight, horizonY)
+        ..lineTo(width, height)
+        ..lineTo(0, height)
+        ..close();
+
+      final asphaltPaint = Paint()..color = const Color(0xFF060B14);
+      canvas.drawPath(roadPath, asphaltPaint);
+
+      // Glowing Cyan Curbs / Edges
+      final curbPaint = Paint()
+        ..color = const Color(0xFF00E5FF)
+        ..strokeWidth = 2.0;
+      canvas.drawLine(Offset(roadTopLeft, horizonY), Offset(0, height), curbPaint);
+      canvas.drawLine(Offset(roadTopRight, horizonY), Offset(width, height), curbPaint);
+    }
+
+    // 2. Horizon Line (40% Calibration Mark)
+    final horizonPaint = Paint()
+      ..color = const Color(0x6600E5FF)
+      ..strokeWidth = 1.5;
+    canvas.drawLine(Offset(0, horizonY), Offset(width, horizonY), horizonPaint);
+
+    final roadTopLeft = width * 0.42;
+    final roadTopRight = width * 0.58;
+
+    // 3. Perspective Lane Dividers
+    final lanePaint = Paint()
+      ..color = const Color(0x4400E5FF)
+      ..strokeWidth = 1.5;
+
+    // Left Lane line
+    final leftTop = roadTopLeft + (roadTopRight - roadTopLeft) * 0.33;
+    canvas.drawLine(Offset(leftTop, horizonY), Offset(width * 0.33, height), lanePaint);
+
+    // Right Lane line
+    final rightTop = roadTopLeft + (roadTopRight - roadTopLeft) * 0.66;
+    canvas.drawLine(Offset(rightTop, horizonY), Offset(width * 0.66, height), lanePaint);
+
+    // 4. Motorcycle Steering Trajectory Guide
+    final bikeX = width * 0.50;
+    final bikeY = height - 24.0;
+    final trajectoryPaint = Paint()
+      ..color = const Color(0x6600E676)
+      ..strokeWidth = 2.0;
+    canvas.drawLine(Offset(bikeX, bikeY), Offset(width * 0.50, horizonY), trajectoryPaint);
+
+    // 5. Motorcycle Center Reticle
+    final reticlePaint = Paint()..color = const Color(0xFF00E676);
+    canvas.drawCircle(Offset(bikeX, bikeY), 8.0, reticlePaint);
+    final reticleRingPaint = Paint()
+      ..color = Colors.white
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.0;
+    canvas.drawCircle(Offset(bikeX, bikeY), 8.0, reticleRingPaint);
+
+    // 6. Hazard Bounding Boxes & Distance Overlays
     for (final h in hazards) {
       final isCritical = h.distanceMeters < 8.0;
       final color = isCritical ? const Color(0xFFFF1744) : const Color(0xFF00E5FF);
 
       final rect = Rect.fromLTRB(
-        h.xMin * size.width,
-        h.yMin * size.height,
-        h.xMax * size.width,
-        h.yMax * size.height,
+        h.xMin * width,
+        h.yMin * height,
+        h.xMax * width,
+        h.yMax * height,
       );
 
       final boxPaint = Paint()
@@ -349,7 +559,7 @@ class TacticalHudPainter extends CustomPainter {
         text: label,
         style: TextStyle(
           color: color,
-          fontSize: isCritical ? 14 : 12,
+          fontSize: isCritical ? 13 : 11,
           fontWeight: FontWeight.bold,
           backgroundColor: Colors.black87,
         ),
@@ -358,7 +568,7 @@ class TacticalHudPainter extends CustomPainter {
         text: textSpan,
         textDirection: TextDirection.ltr,
       )..layout();
-      textPainter.paint(canvas, Offset(rect.left, rect.top - 18));
+      textPainter.paint(canvas, Offset(rect.left, (rect.top - 18).clamp(0.0, height - 20)));
     }
   }
 
