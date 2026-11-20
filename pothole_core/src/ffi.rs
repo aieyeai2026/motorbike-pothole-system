@@ -1,4 +1,7 @@
-use crate::geometry::{compute_lane_centering, CenteringStatus, Lane};
+use crate::geometry::{
+    compute_lane_centering, intersects_trajectory_corridor, is_point_in_drivable_corridor,
+    CenteringStatus, Lane, QuadraticCurve,
+};
 use crate::inference::run_yolo_postprocess;
 use std::slice;
 
@@ -49,6 +52,59 @@ pub unsafe extern "C" fn pothole_core_compute_lane_centering(
         status_code,
     };
     0
+}
+
+/// Evaluates whether a hazard box with bottom span `[x_min, x_max]` at `y_bottom` is:
+/// - `0`: Off-road (outside curved drivable road polygon `[left_curve(y), right_curve(y)]`)
+/// - `1`: On drivable road surface, but outside the motorcycle's trajectory corridor
+/// - `2`: On drivable road surface AND intersecting the motorcycle's trajectory corridor
+#[no_mangle]
+pub unsafe extern "C" fn pothole_core_classify_hazard_corridor(
+    x_min: f32,
+    x_max: f32,
+    y_bottom: f32,
+    y_horizon: f32,
+    frame_bottom: f32,
+    left_poly_ptr: *const f32,
+    right_poly_ptr: *const f32,
+    ego_x: f32,
+    steering_curvature: f32,
+    base_half_width: f32,
+) -> i32 {
+    if left_poly_ptr.is_null() || right_poly_ptr.is_null() {
+        return 0;
+    }
+    let l = slice::from_raw_parts(left_poly_ptr, 3);
+    let r = slice::from_raw_parts(right_poly_ptr, 3);
+    let left_curve = QuadraticCurve { a: l[0], b: l[1], c: l[2] };
+    let right_curve = QuadraticCurve { a: r[0], b: r[1], c: r[2] };
+
+    let x_center = (x_min + x_max) * 0.5;
+    if !is_point_in_drivable_corridor(
+        x_center,
+        y_bottom,
+        y_horizon,
+        frame_bottom,
+        &left_curve,
+        &right_curve,
+        0.02,
+    ) {
+        return 0;
+    }
+    if intersects_trajectory_corridor(
+        x_min,
+        x_max,
+        y_bottom,
+        y_horizon,
+        frame_bottom,
+        ego_x,
+        steering_curvature,
+        base_half_width,
+    ) {
+        2
+    } else {
+        1
+    }
 }
 
 #[no_mangle]
@@ -166,5 +222,41 @@ mod tests {
         assert_eq!(centering.status_code, 1); // 1 = DRIFTING_LEFT
         assert!(centering.offset_meters < -0.25);
         assert!((centering.dist_left_m - 0.72).abs() < 1e-3);
+    }
+
+    #[test]
+    fn t_6_1_3_c_ffi_evaluates_curved_corridor_and_trajectory_intersection() {
+        // Check FFI drivable + trajectory intersection evaluation
+        // code 2 = inside drivable road AND inside motorcycle trajectory path
+        // code 1 = inside drivable road, outside trajectory path
+        // code 0 = off-road (outside drivable polygon)
+        let left_coeffs: [f32; 3] = [0.0, -0.80, 0.82];
+        let right_coeffs: [f32; 3] = [0.0, 0.80, 0.18];
+
+        let in_path = unsafe {
+            pothole_core_classify_hazard_corridor(
+                0.47, 0.53, 0.75, 0.54, 0.85,
+                left_coeffs.as_ptr(), right_coeffs.as_ptr(),
+                0.50, 0.0, 0.11,
+            )
+        };
+        let on_road_out_of_path = unsafe {
+            pothole_core_classify_hazard_corridor(
+                0.26, 0.32, 0.75, 0.54, 0.85,
+                left_coeffs.as_ptr(), right_coeffs.as_ptr(),
+                0.50, 0.0, 0.11,
+            )
+        };
+        let off_road = unsafe {
+            pothole_core_classify_hazard_corridor(
+                0.04, 0.10, 0.75, 0.54, 0.85,
+                left_coeffs.as_ptr(), right_coeffs.as_ptr(),
+                0.50, 0.0, 0.11,
+            )
+        };
+
+        assert_eq!(in_path, 2);
+        assert_eq!(on_road_out_of_path, 1);
+        assert_eq!(off_road, 0);
     }
 }

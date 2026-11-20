@@ -203,3 +203,47 @@ def test_t_ux_7_video_evaluator_live_rust_pipeline_on_uploaded_video(tmp_path):
     assert "postprocess_ms" in result["telemetry"][0]
 
 
+def test_t_ux_8_phase6_curved_road_boundaries_and_offroad_clutter_rejection():
+    """Verify Phase 6 road-level horizon (50-58%), 2nd-degree curved boundaries, off-road clutter filter, and trajectory path collision alert."""
+    import cv2
+    import numpy as np
+    from video_evaluator.server import (
+        calibrate_road_horizon_norm,
+        fit_curved_road_boundaries,
+        classify_hazard_in_corridor_ffi,
+    )
+
+    # Synthetic 360x640 road scene: sky/trees above y=0.54 (194px), gray asphalt road polygon below
+    frame = np.full((360, 640, 3), (40, 95, 50), dtype=np.uint8)  # green vegetation/walls off-road
+    frame[:194, :] = (190, 175, 155)  # sky/canopy above road horizon
+    road_pts = np.array([[250, 194], [390, 194], [580, 310], [60, 310]], dtype=np.int32)
+    cv2.fillPoly(frame, [road_pts], (115, 115, 118))  # gray asphalt surface
+
+    horizon_norm = calibrate_road_horizon_norm(frame)
+    assert 0.50 <= horizon_norm <= 0.58
+
+    horizon_y = int(360 * horizon_norm)
+    left_poly, right_poly, steering_curv = fit_curved_road_boundaries(frame, horizon_y)
+    assert len(left_poly) == 3
+    assert len(right_poly) == 3
+
+    # 1. Off-road parked car / fence at x=[0.02, 0.10], y=0.75 -> rejected (0)
+    code_offroad = classify_hazard_in_corridor_ffi(
+        0.02, 0.10, 0.75, horizon_norm, 0.85, left_poly, right_poly, 0.50, steering_curv
+    )
+    assert code_offroad == 0
+
+    # 2. On-road hazard outside bike's tire-track corridor at x=[0.24, 0.30], y=0.75 -> faint dot (1)
+    code_side = classify_hazard_in_corridor_ffi(
+        0.24, 0.30, 0.75, horizon_norm, 0.85, left_poly, right_poly, 0.50, steering_curv
+    )
+    assert code_side == 1
+
+    # 3. On-road pothole directly in bike's trajectory corridor at x=[0.47, 0.53], y=0.75 -> collision path (2)
+    code_in_path = classify_hazard_in_corridor_ffi(
+        0.47, 0.53, 0.75, horizon_norm, 0.85, left_poly, right_poly, 0.50, steering_curv
+    )
+    assert code_in_path == 2
+
+
+

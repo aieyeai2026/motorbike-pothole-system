@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Local HTTP Server & Real Rust C-ABI Video Pipeline Processor for the
-Dual-Video Computer Vision Evaluator.
+Phase 6 Automotive-Grade AR HUD & Real Rust C-ABI Video Pipeline Processor
+for the Dual-Video Computer Vision Evaluator.
 
-- Accepts any uploaded raw motorcycle video via POST /api/process-video
-- Runs every frame through OpenCV pixel contour/edge extraction + the compiled
-  Rust C-ABI library (libpothole_core.dylib: pothole_core_run_postprocess &
-  pothole_core_compute_lane_centering)
-- Outputs the processed H.264 HUD video and real per-frame telemetry JSON
-- Supports HTTP Range requests (206 Partial Content) for millisecond scrubbing
+1. Calibrates road-level horizon strictly to the physical vanishing horizon (50% - 58%).
+2. Fits dynamic 2nd-degree polynomial curved road boundaries: x(y) = a*y^2 + b*y + c.
+3. Hard-filters all candidates against the curved drivable asphalt polygon via
+   compiled Rust FFI (pothole_core_classify_hazard_corridor) + HSV asphalt mask
+   (zero off-road boxes on trees, fences, buildings, or parked cars).
+4. Projects car backup-camera style dynamic curved motorcycle trajectory tracks
+   with 5m, 10m, and 15m horizontal distance ticks.
+5. Highlights trajectory in crimson and triggers '⚠️ POTHOLE IN PATH: {d}m' only
+   when a road pothole (<10m) intersects the motorcycle's actual trajectory corridor.
 """
 
 import argparse
@@ -88,124 +91,301 @@ def get_rust_lib():
         ctypes.c_float,
         ctypes.POINTER(CLaneCentering),
     ]
+    lib.pothole_core_classify_hazard_corridor.restype = ctypes.c_int32
+    lib.pothole_core_classify_hazard_corridor.argtypes = [
+        ctypes.c_float,
+        ctypes.c_float,
+        ctypes.c_float,
+        ctypes.c_float,
+        ctypes.c_float,
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_float,
+        ctypes.c_float,
+        ctypes.c_float,
+    ]
     _RUST_LIB = lib
     return lib
 
 
-def extract_road_edges_from_frame(gray: np.ndarray, horizon_y: int) -> Tuple[float, float]:
-    """Detect left and right road boundary normalized x-intercepts from actual frame pixels."""
-    h, w = gray.shape
-    roi = gray[horizon_y:int(h * 0.88), :]
-    edges = cv2.Canny(roi, 60, 160)
-    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=35, minLineLength=30, maxLineGap=20)
-
-    x_left_candidates = []
-    x_right_candidates = []
-    if lines is not None:
-        for line in lines:
-            x1, y1, x2, y2 = line[0]
-            dx = x2 - x1
-            dy = y2 - y1
-            if abs(dx) < 5 or abs(dy) < 10:
-                continue
-            slope = dy / float(dx)
-            if -2.5 < slope < -0.25 and x1 < w * 0.55:
-                # Project to bottom of road ROI
-                x_bottom = x1 + (roi.shape[0] - y1) / slope
-                x_left_candidates.append(np.clip(x_bottom / w, 0.02, 0.45))
-            elif 0.25 < slope < 2.5 and x2 > w * 0.45:
-                x_bottom = x1 + (roi.shape[0] - y1) / slope
-                x_right_candidates.append(np.clip(x_bottom / w, 0.55, 0.98))
-
-    x_left = float(np.median(x_left_candidates)) if x_left_candidates else 0.12
-    x_right = float(np.median(x_right_candidates)) if x_right_candidates else 0.88
-    return x_left, x_right
-
-
-def extract_candidates_tensor_from_frame(frame: np.ndarray, horizon_y: int) -> Tuple[List[float], int]:
+def compute_asphalt_mask(frame: np.ndarray) -> np.ndarray:
     """
-    Extracts real visual anomaly & obstacle candidates from the frame pixels
-    and packs them into a [1, 7, N] multi-class tensor for Rust C-ABI postprocessing.
-    Classes: 0 = pothole, 1 = car/vehicle, 2 = debris.
+    Segments low-saturation gray asphalt road surface pixels, rejecting green
+    foliage, high-saturation painted cars (red/yellow/blue), bright sky, and dark shadows.
+    """
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    # Gray asphalt has low saturation (S <= 58) and mid brightness (45 <= V <= 205)
+    b, g, r = cv2.split(frame)
+    max_c = np.maximum(np.maximum(b, g), r)
+    min_c = np.minimum(np.minimum(b, g), r)
+    chroma = max_c - min_c
+
+    sat = hsv[:, :, 1]
+    val = hsv[:, :, 2]
+    mask = ((sat <= 60) & (val >= 45) & (val <= 205) & (chroma <= 32)).astype(np.uint8) * 255
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    return mask
+
+
+def calibrate_road_horizon_norm(frame: np.ndarray) -> float:
+    """
+    Calibrates the road-level horizon vanishing point strictly within [0.50, 0.58]
+    by locating the highest vertical row in the central road corridor where continuous
+    gray asphalt road surface begins.
+    """
+    h, w, _ = frame.shape
+    asphalt = compute_asphalt_mask(frame)
+    x0, x1 = int(w * 0.35), int(w * 0.65)
+    y_min = int(h * 0.50)
+    y_max = int(h * 0.58)
+
+    for y in range(y_min, y_max + 1):
+        row_ratio = float(np.mean(asphalt[y:min(h, y + 6), x0:x1] > 0))
+        if row_ratio >= 0.48:
+            return round(float(np.clip(y / float(h), 0.50, 0.58)), 3)
+    return 0.54
+
+
+def fit_curved_road_boundaries(
+    frame: np.ndarray,
+    horizon_y: int,
+    prev_left: Optional[np.ndarray] = None,
+    prev_right: Optional[np.ndarray] = None,
+) -> Tuple[List[float], List[float], float]:
+    """
+    Extracts curving left and right asphalt road boundaries using sliding horizontal
+    scanlines from y_bottom (0.83) to y_horizon and fits 2nd-degree polynomials:
+      x_left(y)  = a1 * y^2 + b1 * y + c1
+      x_right(y) = a2 * y^2 + b2 * y + c2
+    Also returns the estimated road steering curvature kappa in [-0.24, 0.24].
+    """
+    h, w, _ = frame.shape
+    asphalt = compute_asphalt_mask(frame)
+    horizon_norm = horizon_y / float(h)
+    bottom_norm = 0.83
+
+    y_samples = np.linspace(horizon_norm + 0.01, bottom_norm, 10)
+    left_xs = []
+    right_xs = []
+    valid_ys = []
+
+    center_x = 0.50
+    for yn in y_samples:
+        py = int(yn * h)
+        prog = (yn - horizon_norm) / max(0.05, bottom_norm - horizon_norm)
+        # Expected road corridor bounds widen from [0.36, 0.64] at horizon to [0.08, 0.92] at bottom
+        default_l = 0.37 - 0.29 * prog
+        default_r = 0.63 + 0.29 * prog
+
+        strip = asphalt[max(0, py - 3):min(h, py + 4), :]
+        col_score = np.mean(strip > 0, axis=0)
+        cx_px = int(center_x * w)
+
+        # Scan left from center for non-asphalt boundary transition
+        found_l = default_l
+        non_asphalt_run = 0
+        for px in range(cx_px, int(w * 0.04), -2):
+            if col_score[px] < 0.35:
+                non_asphalt_run += 1
+                if non_asphalt_run >= 4:
+                    found_l = (px + 6) / float(w)
+                    break
+            else:
+                non_asphalt_run = 0
+        found_l = float(np.clip(found_l, default_l - 0.08, 0.44))
+
+        # Scan right from center for non-asphalt boundary transition
+        found_r = default_r
+        non_asphalt_run = 0
+        for px in range(cx_px, int(w * 0.96), 2):
+            if col_score[px] < 0.35:
+                non_asphalt_run += 1
+                if non_asphalt_run >= 4:
+                    found_r = (px - 6) / float(w)
+                    break
+            else:
+                non_asphalt_run = 0
+        found_r = float(np.clip(found_r, 0.56, default_r + 0.08))
+
+        if found_r - found_l >= 0.16:
+            valid_ys.append(yn)
+            left_xs.append(found_l)
+            right_xs.append(found_r)
+            center_x = 0.5 * (found_l + found_r)
+
+    if len(valid_ys) >= 4:
+        l_poly = np.polyfit(valid_ys, left_xs, 2)
+        r_poly = np.polyfit(valid_ys, right_xs, 2)
+        # Limit quadratic curvature coefficient to prevent wild oscillation
+        l_poly[0] = np.clip(l_poly[0], -1.2, 1.2)
+        r_poly[0] = np.clip(r_poly[0], -1.2, 1.2)
+    else:
+        l_poly = np.array([0.0, -0.95, 0.89])
+        r_poly = np.array([0.0, 0.95, 0.11])
+
+    if prev_left is not None and prev_right is not None:
+        l_poly = 0.72 * prev_left + 0.28 * l_poly
+        r_poly = 0.72 * prev_right + 0.28 * r_poly
+
+    # Evaluate road centerline at horizon vs bottom to compute steering curvature
+    l_top = float(np.polyval(l_poly, horizon_norm + 0.02))
+    r_top = float(np.polyval(r_poly, horizon_norm + 0.02))
+    l_bot = float(np.polyval(l_poly, bottom_norm))
+    r_bot = float(np.polyval(r_poly, bottom_norm))
+    center_top = 0.5 * (l_top + r_top)
+    center_bot = 0.5 * (l_bot + r_bot)
+    steering_curv = float(np.clip((center_top - center_bot) * 0.95, -0.22, 0.22))
+
+    return [float(c) for c in l_poly], [float(c) for c in r_poly], steering_curv
+
+
+def classify_hazard_in_corridor_ffi(
+    x_min: float,
+    x_max: float,
+    y_bottom: float,
+    y_horizon: float,
+    frame_bottom: float,
+    left_poly: List[float],
+    right_poly: List[float],
+    ego_x: float = 0.50,
+    steering_curv: float = 0.0,
+    base_half_width: float = 0.11,
+) -> int:
+    """
+    Calls compiled Rust pothole_core_classify_hazard_corridor:
+      0 = off-road (outside curved drivable polygon)
+      1 = on drivable road, outside motorcycle trajectory corridor
+      2 = on drivable road AND inside motorcycle trajectory corridor
+    """
+    lib = get_rust_lib()
+    l_arr = (ctypes.c_float * 3)(*left_poly)
+    r_arr = (ctypes.c_float * 3)(*right_poly)
+    return int(
+        lib.pothole_core_classify_hazard_corridor(
+            ctypes.c_float(x_min),
+            ctypes.c_float(x_max),
+            ctypes.c_float(y_bottom),
+            ctypes.c_float(y_horizon),
+            ctypes.c_float(frame_bottom),
+            l_arr,
+            r_arr,
+            ctypes.c_float(ego_x),
+            ctypes.c_float(steering_curv),
+            ctypes.c_float(base_half_width),
+        )
+    )
+
+
+def build_drivable_polygon_mask(
+    h: int,
+    w: int,
+    horizon_norm: float,
+    bottom_norm: float,
+    left_poly: List[float],
+    right_poly: List[float],
+    inner_margin: float = 0.03,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Builds the binary mask and boundary polyline points of the curved drivable road surface."""
+    ys = np.linspace(horizon_norm, bottom_norm, 24)
+    left_pts = []
+    right_pts = []
+    for yn in ys:
+        py = int(yn * h)
+        lx = int(np.clip(np.polyval(left_poly, yn) + inner_margin, 0.02, 0.48) * w)
+        rx = int(np.clip(np.polyval(right_poly, yn) - inner_margin, 0.52, 0.98) * w)
+        left_pts.append([lx, py])
+        right_pts.append([rx, py])
+
+    poly_pts = np.array(left_pts + right_pts[::-1], dtype=np.int32)
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.fillPoly(mask, [poly_pts], 255)
+
+    # Also return the un-margined visual boundary curves for drawing
+    vis_left = []
+    vis_right = []
+    for yn in ys:
+        py = int(yn * h)
+        vis_left.append([int(np.clip(np.polyval(left_poly, yn), 0.01, 0.49) * w), py])
+        vis_right.append([int(np.clip(np.polyval(right_poly, yn), 0.51, 0.99) * w), py])
+
+    return mask, np.array(vis_left, dtype=np.int32), np.array(vis_right, dtype=np.int32)
+
+
+def extract_pothole_candidates_on_drivable_road(
+    frame: np.ndarray,
+    horizon_norm: float,
+    bottom_norm: float,
+    left_poly: List[float],
+    right_poly: List[float],
+) -> Tuple[List[float], int]:
+    """
+    Phase 6 Strict Road-Surface Pothole Extractor:
+    - Searches ONLY inside the curved drivable road polygon AND low-saturation gray asphalt mask.
+    - Verifies that the surrounding ring around each dark depression is homogeneous gray asphalt
+      (eliminating cars, motorcycles, roadside fences, trees, and shadows).
+    - Packs genuine road-surface potholes (class 0) into a [1, 7, N] tensor for Rust C-ABI NMS.
     """
     h, w, _ = frame.shape
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    y_start = horizon_y
-    y_end = int(h * 0.86)  # exclude motorcycle hood/helmet at bottom
-    road_gray = gray[y_start:y_end, :]
+    asphalt_mask = compute_asphalt_mask(frame)
+    drivable_mask, _, _ = build_drivable_polygon_mask(
+        h, w, horizon_norm, bottom_norm, left_poly, right_poly, inner_margin=0.035
+    )
+    road_only_mask = cv2.bitwise_and(drivable_mask, asphalt_mask)
 
-    # 1. Local background contrast & gradient analysis for dark road depressions (potholes) and debris
-    local_bg = cv2.GaussianBlur(road_gray, (61, 61), 0)
-    blackhat = cv2.subtract(local_bg, road_gray)
-    grad_x = cv2.Sobel(road_gray, cv2.CV_32F, 1, 0, ksize=3)
-    grad_y = cv2.Sobel(road_gray, cv2.CV_32F, 0, 1, ksize=3)
+    local_bg = cv2.GaussianBlur(gray, (55, 55), 0)
+    depression = cv2.subtract(local_bg, gray)
+    depression_masked = cv2.bitwise_and(depression, depression, mask=drivable_mask)
+
+    grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
     grad_mag = cv2.magnitude(grad_x, grad_y)
 
-    _, thresh = cv2.threshold(blackhat, 22, 255, cv2.THRESH_BINARY)
+    _, thresh = cv2.threshold(depression_masked, 24, 255, cv2.THRESH_BINARY)
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     anchors: List[Tuple[float, float, float, float, float, float, float]] = []
 
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if area < 90 or area > (w * h * 0.15):
+        # Potholes on the road surface are compact localized defects, never huge vehicle blobs
+        if area < 95 or area > (w * h * 0.035):
             continue
         bx, by, bw, bh = cv2.boundingRect(cnt)
+        if bw < 12 or bh < 8 or bw > w * 0.24 or bh > h * 0.16:
+            continue
         aspect = bw / float(max(bh, 1))
-        # Phase 5 false-positive suppression: reject wide crosswalk paint stripes
-        if aspect > 5.5 or aspect < 0.25:
+        if aspect > 4.5 or aspect < 0.45:
             continue
 
-        # Check interior edge gradient to reject smooth canopy shadows
+        # Verify surrounding context ring is genuine gray asphalt (not a car tire/shadow)
+        pad = 10
+        rx0, ry0 = max(0, bx - pad), max(0, by - pad)
+        rx1, ry1 = min(w, bx + bw + pad), min(h, by + bh + pad)
+        surround_asphalt_ratio = float(np.mean(road_only_mask[ry0:ry1, rx0:rx1] > 0))
+        if surround_asphalt_ratio < 0.42:
+            continue
+
         patch_grad = float(np.mean(grad_mag[by:by + bh, bx:bx + bw]))
-        patch_dark = float(np.mean(blackhat[by:by + bh, bx:bx + bw]))
-        if patch_grad < 14.0:
+        patch_dark = float(np.mean(depression[by:by + bh, bx:bx + bw]))
+        if patch_grad < 16.0 or patch_dark < 22.0:
             continue
 
         cx_640 = ((bx + bw * 0.5) / w) * 640.0
-        cy_640 = (((by + y_start) + bh * 0.5) / h) * 640.0
+        cy_640 = ((by + bh * 0.5) / h) * 640.0
         w_640 = (bw / w) * 640.0
         h_640 = (bh / h) * 640.0
-
-        score = float(np.clip(0.52 + (patch_dark / 120.0) + (patch_grad / 180.0), 0.51, 0.96))
-        if area >= 220 and 0.6 <= aspect <= 4.2:
-            # Class 0: pothole
-            anchors.append((cx_640, cy_640, w_640, h_640, score, 0.10, 0.10))
-        else:
-            # Class 2: debris
-            anchors.append((cx_640, cy_640, w_640, h_640, 0.10, 0.10, score * 0.92))
-
-    # 2. Vertical obstacle / vehicle detection via high vertical edge density boxes
-    edges_full = cv2.Canny(gray[int(h * 0.25):y_end, :], 80, 180)
-    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
-    closed = cv2.morphologyEx(edges_full, cv2.MORPH_CLOSE, v_kernel)
-    v_contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    y_v_offset = int(h * 0.25)
-
-    for cnt in v_contours:
-        bx, by, bw, bh = cv2.boundingRect(cnt)
-        if bw < w * 0.11 or bh < h * 0.14 or bw > w * 0.75:
-            continue
-        aspect = bw / float(max(bh, 1))
-        if not (0.45 <= aspect <= 2.4):
-            continue
-        y_bottom = by + y_v_offset + bh
-        if y_bottom < horizon_y + 15:
-            continue
-        cx_640 = ((bx + bw * 0.5) / w) * 640.0
-        cy_640 = ((by + y_v_offset + bh * 0.5) / h) * 640.0
-        w_640 = (bw / w) * 640.0
-        h_640 = (bh / h) * 640.0
-        edge_density = float(np.mean(edges_full[by:by + bh, bx:bx + bw])) / 255.0
-        if edge_density > 0.08:
-            conf = float(np.clip(0.55 + edge_density * 1.5, 0.55, 0.94))
-            anchors.append((cx_640, cy_640, w_640, h_640, 0.05, conf, 0.05))
+        score = float(np.clip(0.55 + (patch_dark / 110.0) + (patch_grad / 160.0), 0.55, 0.96))
+        anchors.append((cx_640, cy_640, w_640, h_640, score, 0.05, 0.05))
 
     if not anchors:
         return [], 0
 
-    # Keep top 40 candidate anchors before passing to Rust C-ABI NMS
-    anchors = anchors[:40]
+    # Sort by confidence and pass top 12 road-surface pothole candidates to Rust NMS
+    anchors.sort(key=lambda a: a[4], reverse=True)
+    anchors = anchors[:12]
     n = len(anchors)
     tensor: List[float] = []
     for ch in range(7):
@@ -214,17 +394,45 @@ def extract_candidates_tensor_from_frame(frame: np.ndarray, horizon_y: int) -> T
     return tensor, n
 
 
+def compute_trajectory_point_pair(
+    yn: float,
+    horizon_norm: float,
+    bottom_norm: float,
+    ego_x: float,
+    steering_curv: float,
+    base_half_w: float = 0.11,
+) -> Tuple[float, float]:
+    """Matches pothole_core::geometry::compute_trajectory_corridor for rendering."""
+    span = max(0.05, bottom_norm - horizon_norm)
+    prog = float(np.clip((yn - horizon_norm) / span, 0.0, 1.0))
+    dist_from_bike = 1.0 - prog
+    center_x = ego_x + steering_curv * dist_from_bike * dist_from_bike
+    half_w = base_half_w * (0.22 + 0.78 * prog)
+    return center_x - half_w, center_x + half_w
+
+
+def inverse_y_for_distance(distance_m: float, horizon_norm: float) -> float:
+    """Matches pothole_core::geometry::inverse_perspective_y_for_distance (2m..30m)."""
+    d = float(np.clip(distance_m, 2.0, 30.0))
+    curved = (d - 2.0) / 28.0
+    road_progress = float(np.clip(1.0 - curved, 0.0, 1.0)) ** (1.0 / 0.65)
+    return float(np.clip(horizon_norm + road_progress * (1.0 - horizon_norm), horizon_norm, 1.0))
+
+
 def process_video_through_rust_pipeline(
     input_path: str,
     output_path: str,
-    max_frames: int = 900,
+    max_frames: int = 600,
     target_fps: float = 30.0,
     convert_h264: bool = True,
 ) -> Dict[str, Any]:
     """
-    Runs an uploaded video file through OpenCV pixel extraction + the compiled
-    Rust C-ABI library (libpothole_core.dylib), writing the annotated HUD video
-    and returning real per-frame telemetry.
+    Phase 6 Automotive AR HUD Pipeline:
+    - Calibrates true road-level horizon (50% - 58%).
+    - Fits dynamic 2nd-degree curved road boundaries.
+    - Hard-filters all candidates against the curved drivable polygon in Rust C-ABI.
+    - Renders car backup-camera style curved trajectory tracks with 5m/10m/15m ticks.
+    - Triggers crimson path highlight + '⚠️ POTHOLE IN PATH: {d}m' only for in-path collisions.
     """
     lib = get_rust_lib()
     cap = cv2.VideoCapture(input_path)
@@ -234,11 +442,10 @@ def process_video_through_rust_pipeline(
     fps_in = cap.get(cv2.CAP_PROP_FPS) or 30.0
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 360
-    total_in = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or max_frames
 
     out_fps = min(fps_in, target_fps) if fps_in > 0 else 30.0
     step = max(1, int(round(fps_in / out_fps)))
-    horizon_y = int(h * 0.40)
+    bottom_norm = 0.83
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     tmp_raw_out = output_path + ".raw.mp4" if convert_h264 else output_path
@@ -248,6 +455,9 @@ def process_video_through_rust_pipeline(
     telemetry: List[Dict[str, Any]] = []
     frame_idx = 0
     processed_count = 0
+    smooth_horizon = 0.54
+    prev_left_poly: Optional[np.ndarray] = None
+    prev_right_poly: Optional[np.ndarray] = None
 
     while processed_count < max_frames:
         ret, frame = cap.read()
@@ -258,15 +468,27 @@ def process_video_through_rust_pipeline(
             continue
 
         t0 = time.perf_counter_ns()
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        x_left, x_right = extract_road_edges_from_frame(gray, horizon_y)
 
-        # Call Rust C-ABI lane centering
+        # 1. Calibrate road-level horizon (50% - 58%) with smooth temporal damping
+        raw_horizon = calibrate_road_horizon_norm(frame)
+        smooth_horizon = round(0.80 * smooth_horizon + 0.20 * raw_horizon, 4)
+        horizon_y = int(smooth_horizon * h)
+
+        # 2. Fit dynamic 2nd-degree polynomial curved road boundaries
+        left_poly, right_poly, steering_curv = fit_curved_road_boundaries(
+            frame, horizon_y, prev_left_poly, prev_right_poly
+        )
+        prev_left_poly = np.array(left_poly)
+        prev_right_poly = np.array(right_poly)
+
+        # 3. Compute Rust C-ABI lane centering at near-field ground contact
+        x_left_bot = float(np.clip(np.polyval(left_poly, bottom_norm), 0.02, 0.48))
+        x_right_bot = float(np.clip(np.polyval(right_poly, bottom_norm), 0.52, 0.98))
         c_center = CLaneCentering()
         lib.pothole_core_compute_lane_centering(
             ctypes.c_float(0.50),
-            ctypes.c_float(x_left),
-            ctypes.c_float(x_right),
+            ctypes.c_float(x_left_bot),
+            ctypes.c_float(x_right_bot),
             ctypes.c_float(3.6),
             ctypes.byref(c_center),
         )
@@ -274,29 +496,45 @@ def process_video_through_rust_pipeline(
             c_center.status_code, "CENTERED"
         )
 
-        # Extract pixel candidates & call Rust C-ABI multi-class postprocess
-        tensor, n_anchors = extract_candidates_tensor_from_frame(frame, horizon_y)
+        # 4. Extract road-surface pothole candidates & run Rust C-ABI postprocess + corridor filter
+        tensor, n_anchors = extract_pothole_candidates_on_drivable_road(
+            frame, smooth_horizon, bottom_norm, left_poly, right_poly
+        )
         detections = []
         if n_anchors > 0:
             tensor_arr = (ctypes.c_float * len(tensor))(*tensor)
-            max_out = 20
+            max_out = 10
             out_buf = (CDetectedPothole * max_out)()
             count = lib.pothole_core_run_postprocess(
                 tensor_arr,
                 len(tensor),
                 n_anchors,
                 ctypes.c_float(640.0),
-                ctypes.c_float(0.50),
+                ctypes.c_float(0.55),
                 ctypes.c_float(0.45),
-                ctypes.c_float(0.40),
+                ctypes.c_float(smooth_horizon),
                 ctypes.c_float(1.25),
                 out_buf,
                 max_out,
             )
             for i in range(count):
                 d = out_buf[i]
+                corridor_code = classify_hazard_in_corridor_ffi(
+                    float(d.x_min),
+                    float(d.x_max),
+                    float(d.y_max),
+                    smooth_horizon,
+                    bottom_norm,
+                    left_poly,
+                    right_poly,
+                    0.50,
+                    steering_curv,
+                    0.11,
+                )
+                # Hard filter: suppress everything outside the curved drivable road polygon
+                if corridor_code == 0:
+                    continue
                 lane_str = {0: "LEFT", 1: "CENTER", 2: "RIGHT"}.get(d.lane_code, "CENTER")
-                cls_str = {0: "POTHOLE", 1: "CAR", 2: "DEBRIS"}.get(d.class_id, "POTHOLE")
                 detections.append({
                     "x_min": round(float(d.x_min), 4),
                     "y_min": round(float(d.y_min), 4),
@@ -306,70 +544,116 @@ def process_video_through_rust_pipeline(
                     "distance_m": round(float(d.distance_meters), 2),
                     "severity": round(float(d.severity_score), 1),
                     "lane": lane_str,
-                    "class_name": cls_str,
-                    "class_id": int(d.class_id),
+                    "in_path": corridor_code == 2,
                 })
 
         elapsed_ms = (time.perf_counter_ns() - t0) / 1_000_000.0
 
-        # Draw HUD on output frame
+        # ── 5. Render Automotive AR HUD Overlay ──
         overlay = frame.copy()
-        cv2.line(overlay, (0, horizon_y), (w, horizon_y), (255, 229, 0), 1)
-        cv2.line(overlay, (int(w * 0.42), horizon_y), (int(x_left * w), h), (118, 230, 0), 2)
-        cv2.line(overlay, (int(w * 0.58), horizon_y), (int(x_right * w), h), (118, 230, 0), 2)
+        _, vis_left_pts, vis_right_pts = build_drivable_polygon_mask(
+            h, w, smooth_horizon, bottom_norm, left_poly, right_poly, inner_margin=0.0
+        )
 
-        potholes = [d for d in detections if d["class_id"] == 0]
-        closest_pothole_m = min((d["distance_m"] for d in potholes), default=None)
-        closest_any = min(detections, key=lambda d: d["distance_m"], default=None)
+        # Subtle road-level horizon line (calibrated at 50-58%)
+        cv2.line(overlay, (0, horizon_y), (w, horizon_y), (180, 210, 0), 1, cv2.LINE_AA)
 
-        crit_pothole = None
+        # Smooth curved neon cyan road boundaries contouring the asphalt edges
+        cv2.polylines(overlay, [vis_left_pts], False, (255, 229, 0), 2, cv2.LINE_AA)
+        cv2.polylines(overlay, [vis_right_pts], False, (255, 229, 0), 2, cv2.LINE_AA)
+
+        # Check for imminent in-path collision (< 10m directly inside trajectory corridor)
+        in_path_potholes = [d for d in detections if d["in_path"] and d["distance_m"] < 10.0]
+        crit_pothole = min(in_path_potholes, key=lambda d: d["distance_m"], default=None)
+
+        # Dynamic Backup-Camera Vehicle Trajectory Tracks
+        traj_ys = np.linspace(smooth_horizon + 0.02, bottom_norm, 20)
+        traj_l_pts = []
+        traj_r_pts = []
+        for yn in traj_ys:
+            tl, tr = compute_trajectory_point_pair(yn, smooth_horizon, bottom_norm, 0.50, steering_curv, 0.11)
+            traj_l_pts.append([int(tl * w), int(yn * h)])
+            traj_r_pts.append([int(tr * w), int(yn * h)])
+
+        traj_color = (68, 23, 255) if crit_pothole is not None else (118, 230, 0)
+        traj_thickness = 3 if crit_pothole is not None else 2
+        cv2.polylines(overlay, [np.array(traj_l_pts, dtype=np.int32)], False, traj_color, traj_thickness, cv2.LINE_AA)
+        cv2.polylines(overlay, [np.array(traj_r_pts, dtype=np.int32)], False, traj_color, traj_thickness, cv2.LINE_AA)
+
+        # Horizontal distance ticks along trajectory corridor at 5m, 10m, and 15m
+        for tick_m in (5.0, 10.0, 15.0):
+            yn_tick = inverse_y_for_distance(tick_m, smooth_horizon)
+            if smooth_horizon < yn_tick <= bottom_norm:
+                tl, tr = compute_trajectory_point_pair(yn_tick, smooth_horizon, bottom_norm, 0.50, steering_curv, 0.11)
+                py_t = int(yn_tick * h)
+                px_l, px_r = int(tl * w), int(tr * w)
+                cv2.line(overlay, (px_l, py_t), (px_r, py_t), traj_color, 1, cv2.LINE_AA)
+                cv2.putText(
+                    overlay, f"{int(tick_m)}m", (px_r + 5, py_t + 3),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.34, traj_color, 1, cv2.LINE_AA
+                )
+
+        # Render road-surface hazards: unobtrusive dots outside path vs crimson reticle in path
         for det in detections:
+            cx_px = int(((det["x_min"] + det["x_max"]) * 0.5) * w)
+            cy_px = int(((det["y_min"] + det["y_max"]) * 0.5) * h)
+
+            if not det["in_path"]:
+                # Safe (outside bike trajectory path): faint, unobtrusive road dot only
+                cv2.circle(overlay, (cx_px, cy_px), 4, (255, 229, 0), -1, cv2.LINE_AA)
+                cv2.circle(overlay, (cx_px, cy_px), 6, (255, 229, 0), 1, cv2.LINE_AA)
+                continue
+
             bx1, by1 = int(det["x_min"] * w), int(det["y_min"] * h)
             bx2, by2 = int(det["x_max"] * w), int(det["y_max"] * h)
-            is_crit = det["class_id"] == 0 and det["distance_m"] < 8.0 and det["confidence"] >= 0.75
-            if is_crit and crit_pothole is None:
-                crit_pothole = det
+            is_imminent = det["distance_m"] < 10.0
+            box_color = (68, 23, 255) if is_imminent else (118, 230, 0)
 
-            if det["class_id"] == 0:
-                color = (68, 23, 255) if is_crit else (255, 229, 0)
-            elif det["class_id"] == 1:
-                color = (0, 170, 255)
-            else:
-                color = (0, 230, 118)
+            cv2.rectangle(overlay, (bx1, by1), (bx2, by2), box_color, 2, cv2.LINE_AA)
+            if is_imminent:
+                # Automotive impact target reticle
+                cv2.circle(overlay, (cx_px, cy_px), 10, (68, 23, 255), 2, cv2.LINE_AA)
+                cv2.line(overlay, (cx_px - 14, cy_px), (cx_px + 14, cy_px), (68, 23, 255), 1, cv2.LINE_AA)
+                cv2.line(overlay, (cx_px, cy_px - 14), (cx_px, cy_px + 14), (68, 23, 255), 1, cv2.LINE_AA)
 
-            cv2.rectangle(overlay, (bx1, by1), (bx2, by2), color, 2)
-            label = f"{det['class_name']} {det['distance_m']:.1f}m [{det['lane']}]"
-            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.40, 1)
-            cv2.rectangle(overlay, (bx1, max(0, by1 - th - 6)), (bx1 + tw + 6, by1), color, -1)
+            label = f"POTHOLE {det['distance_m']:.1f}m"
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
+            cv2.rectangle(overlay, (bx1, max(0, by1 - th - 6)), (bx1 + tw + 6, by1), box_color, -1)
             cv2.putText(
                 overlay, label, (bx1 + 3, max(10, by1 - 3)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 0, 0), 1, cv2.LINE_AA
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 255, 255), 1, cv2.LINE_AA
             )
 
-        cv2.rectangle(overlay, (0, 0), (w, 30), (15, 15, 22), -1)
+        # Clean top telemetry bar
+        cv2.rectangle(overlay, (0, 0), (w, 28), (12, 16, 24), -1)
         hdr = (
-            f"RUST C-ABI | Frame {processed_count} | Hazards: {len(detections)} | "
+            f"AR HUD PHASE 6 | Horizon: {int(smooth_horizon * 100)}% | "
+            f"Road Hazards: {len(detections)} (In-Path: {len(in_path_potholes)}) | "
             f"Ego: {center_status} ({c_center.offset_meters:+.2f}m) | {elapsed_ms:.2f}ms"
         )
-        cv2.putText(overlay, hdr, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 229, 0), 1, cv2.LINE_AA)
+        cv2.putText(overlay, hdr, (10, 19), cv2.FONT_HERSHEY_SIMPLEX, 0.37, (255, 229, 0), 1, cv2.LINE_AA)
 
         if crit_pothole is not None:
-            cv2.rectangle(overlay, (w // 6, 34), (w * 5 // 6, 64), (40, 15, 230), -1)
-            msg = f"CRITICAL POTHOLE < 8M: {crit_pothole['distance_m']:.1f}m [{crit_pothole['lane']}]"
-            cv2.putText(overlay, msg, (w // 6 + 14, 54), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.rectangle(overlay, (w // 5, 32), (w * 4 // 5, 62), (45, 18, 235), -1)
+            msg = f"WARNING: POTHOLE IN PATH: {crit_pothole['distance_m']:.1f}m"
+            cv2.putText(overlay, msg, (w // 5 + 18, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 2, cv2.LINE_AA)
 
-        writer.write(cv2.addWeighted(overlay, 0.88, frame, 0.12, 0))
+        writer.write(cv2.addWeighted(overlay, 0.86, frame, 0.14, 0))
 
+        closest_any = min(detections, key=lambda d: d["distance_m"], default=None)
         telemetry.append({
             "frame": processed_count,
             "time_s": round(processed_count / out_fps, 3),
             "hazard_count": len(detections),
-            "pothole_count": len(potholes),
-            "closest_distance_m": closest_pothole_m if closest_pothole_m is not None else (
+            "pothole_count": len(detections),
+            "in_path_count": len(in_path_potholes),
+            "closest_distance_m": crit_pothole["distance_m"] if crit_pothole else (
                 closest_any["distance_m"] if closest_any else None
             ),
             "closest_is_critical": bool(crit_pothole is not None),
-            "assigned_lane": closest_any["lane"] if closest_any else "CENTER",
+            "assigned_lane": crit_pothole["lane"] if crit_pothole else (
+                closest_any["lane"] if closest_any else "CENTER"
+            ),
             "centering_status": center_status,
             "offset_m": round(float(c_center.offset_meters), 2),
             "postprocess_ms": round(elapsed_ms, 2),
@@ -426,7 +710,7 @@ def get_available_presets() -> List[Dict[str, str]]:
     return [
         {
             "id": "ride_test",
-            "name": "Benchmark Footage (ride_test.mp4 — Run Live Rust Pipeline)",
+            "name": "Benchmark Footage (ride_test.mp4 — Run Phase 6 AR HUD Pipeline)",
             "raw_url": "/fixtures/ride_test.mp4",
             "hud_url": "/fixtures/pipeline_output/pipeline_output.mp4",
             "fps": "30.0",
@@ -499,7 +783,7 @@ class VideoEvalRequestHandler(SimpleHTTPRequestHandler):
         if parsed_path == "/api/process-fixture":
             os.makedirs(UPLOADS_DIR, exist_ok=True)
             raw_path = os.path.join(FIXTURES_DIR, "ride_test.mp4")
-            hud_filename = "hud_ride_test_live.mp4"
+            hud_filename = "hud_ride_test_phase6.mp4"
             hud_path = os.path.join(UPLOADS_DIR, hud_filename)
             try:
                 result = process_video_through_rust_pipeline(
@@ -573,7 +857,7 @@ class VideoEvalRequestHandler(SimpleHTTPRequestHandler):
 def run_server(host: str = "127.0.0.1", port: int = 8085) -> None:
     server = ThreadingHTTPServer((host, port), VideoEvalRequestHandler)
     print("============================================================")
-    print("Motorbike Vision Model Evaluator (Real Rust C-ABI Pipeline):")
+    print("Motorbike Vision Model Evaluator (Phase 6 AR HUD Pipeline):")
     print(f"  http://{host}:{port}")
     print("============================================================")
     try:

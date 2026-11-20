@@ -106,6 +106,14 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
     }
   }
 
+  @override
+  void didUpdateWidget(covariant PotholeHudScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.initialHazards != oldWidget.initialHazards && widget.initialHazards != null) {
+      _activeHazards = widget.initialHazards!;
+    }
+  }
+
   Future<void> _initNativePipeline() async {
     // 1. Initialize Rust C-FFI Bridge
     try {
@@ -291,8 +299,17 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
     super.dispose();
   }
 
-  bool get _hasCriticalAlert => _activeHazards.any(
-      (h) => h.hazardType == 'pothole' && h.distanceMeters < 8.0 && h.confidence >= 0.75);
+  PotholeHazard? get _inPathCriticalPothole {
+    final matches = _activeHazards.where((h) =>
+        h.hazardType == 'pothole' &&
+        h.inTrajectoryPath &&
+        h.distanceMeters < 10.0 &&
+        h.confidence >= 0.75);
+    if (matches.isEmpty) return null;
+    return matches.reduce((a, b) => a.distanceMeters <= b.distanceMeters ? a : b);
+  }
+
+  bool get _hasCriticalAlert => _inPathCriticalPothole != null;
 
   void _showBackendSettingsDialog() {
     final controller = TextEditingController(text: _backendUrl);
@@ -432,9 +449,9 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
                           BoxShadow(color: Color(0xAAFF1744), blurRadius: 12),
                         ],
                       ),
-                      child: const Text(
-                        '⚠️ CRITICAL POTHOLE < 8M!',
-                        style: TextStyle(
+                      child: Text(
+                        '⚠️ POTHOLE IN PATH: ${_inPathCriticalPothole!.distanceMeters.toStringAsFixed(1)}m',
+                        style: const TextStyle(
                           color: Colors.white,
                           fontWeight: FontWeight.w900,
                           fontSize: 14,
@@ -644,78 +661,85 @@ class TacticalHudPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final width = size.width;
     final height = size.height;
-    final horizonY = height * 0.40;
+    // Phase 6: Calibrate horizon strictly to physical road-level horizon (54% down frame)
+    final horizonY = height * 0.54;
+    final bottomY = height * 0.85;
 
     // 1. Synthetic Perspective Road Surface (if camera feed is not running)
     if (!hasCamera) {
-      // Sky
       final skyPaint = Paint()..color = const Color(0xFF090F1C);
       canvas.drawRect(Rect.fromLTWH(0, 0, width, horizonY), skyPaint);
 
-      // Road Surface
-      final roadTopLeft = width * 0.42;
-      final roadTopRight = width * 0.58;
-      final roadPath = Path()
-        ..moveTo(roadTopLeft, horizonY)
-        ..lineTo(roadTopRight, horizonY)
-        ..lineTo(width, height)
-        ..lineTo(0, height)
-        ..close();
-
       final asphaltPaint = Paint()..color = const Color(0xFF060B14);
-      canvas.drawPath(roadPath, asphaltPaint);
-
-      // Glowing Cyan Curbs / Edges
-      final curbPaint = Paint()
-        ..color = const Color(0xFF00E5FF)
-        ..strokeWidth = 2.0;
-      canvas.drawLine(Offset(roadTopLeft, horizonY), Offset(0, height), curbPaint);
-      canvas.drawLine(Offset(roadTopRight, horizonY), Offset(width, height), curbPaint);
+      canvas.drawRect(Rect.fromLTWH(0, horizonY, width, height - horizonY), asphaltPaint);
     }
 
-    // 2. Horizon Line (40% Calibration Mark)
+    // 2. Road-Level Horizon Line (54% Calibration Mark)
     final horizonPaint = Paint()
-      ..color = const Color(0x6600E5FF)
-      ..strokeWidth = 1.5;
+      ..color = const Color(0x5500E5FF)
+      ..strokeWidth = 1.2;
     canvas.drawLine(Offset(0, horizonY), Offset(width, horizonY), horizonPaint);
 
-    final roadTopLeft = width * 0.42;
-    final roadTopRight = width * 0.58;
+    // 3. Dynamic 2nd-Degree Curved Road Boundaries
+    final leftBoundary = Path()
+      ..moveTo(width * 0.39, horizonY)
+      ..quadraticBezierTo(width * 0.25, height * 0.70, width * 0.08, bottomY);
+    final rightBoundary = Path()
+      ..moveTo(width * 0.61, horizonY)
+      ..quadraticBezierTo(width * 0.75, height * 0.70, width * 0.92, bottomY);
 
-    // 3. Perspective Lane Dividers
-    final lanePaint = Paint()
-      ..color = const Color(0x4400E5FF)
-      ..strokeWidth = 1.5;
-
-    // Left Lane line
-    final leftTop = roadTopLeft + (roadTopRight - roadTopLeft) * 0.33;
-    canvas.drawLine(Offset(leftTop, horizonY), Offset(width * 0.33, height), lanePaint);
-
-    // Right Lane line
-    final rightTop = roadTopLeft + (roadTopRight - roadTopLeft) * 0.66;
-    canvas.drawLine(Offset(rightTop, horizonY), Offset(width * 0.66, height), lanePaint);
-
-    // 4. Motorcycle Steering Trajectory Guide
-    final bikeX = width * 0.50;
-    final bikeY = height - 24.0;
-    final trajectoryPaint = Paint()
-      ..color = const Color(0x6600E676)
-      ..strokeWidth = 2.0;
-    canvas.drawLine(Offset(bikeX, bikeY), Offset(width * 0.50, horizonY), trajectoryPaint);
-
-    // 5. Motorcycle Center Reticle
-    final reticlePaint = Paint()..color = const Color(0xFF00E676);
-    canvas.drawCircle(Offset(bikeX, bikeY), 8.0, reticlePaint);
-    final reticleRingPaint = Paint()
-      ..color = Colors.white
+    final curbPaint = Paint()
+      ..color = const Color(0xCC00E5FF)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.0;
-    canvas.drawCircle(Offset(bikeX, bikeY), 8.0, reticleRingPaint);
+      ..strokeWidth = 2.5;
+    canvas.drawPath(leftBoundary, curbPaint);
+    canvas.drawPath(rightBoundary, curbPaint);
 
-    // 6. Hazard Bounding Boxes & Distance Overlays
+    // 4. Dynamic Vehicle Trajectory Guidance (Car Backup-Camera Style with 5m, 10m, 15m ticks)
+    final hasInPathCollision = hazards.any(
+      (h) => h.hazardType == 'pothole' && h.inTrajectoryPath && h.distanceMeters < 10.0,
+    );
+    final trajColor = hasInPathCollision ? const Color(0xFFFF1744) : const Color(0xCC00E676);
+    final trajPaint = Paint()
+      ..color = trajColor
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = hasInPathCollision ? 3.0 : 2.0;
+
+    final leftTrack = Path()
+      ..moveTo(width * 0.47, horizonY)
+      ..quadraticBezierTo(width * 0.44, height * 0.70, width * 0.39, bottomY);
+    final rightTrack = Path()
+      ..moveTo(width * 0.53, horizonY)
+      ..quadraticBezierTo(width * 0.56, height * 0.70, width * 0.61, bottomY);
+    canvas.drawPath(leftTrack, trajPaint);
+    canvas.drawPath(rightTrack, trajPaint);
+
+    // Horizontal distance rungs at 15m, 10m, 5m
+    for (final tickYRatio in [0.62, 0.70, 0.78]) {
+      final ty = height * tickYRatio;
+      final prog = (ty - horizonY) / (bottomY - horizonY);
+      final halfW = width * (0.03 + 0.08 * prog);
+      canvas.drawLine(
+        Offset(width * 0.50 - halfW, ty),
+        Offset(width * 0.50 + halfW, ty),
+        trajPaint,
+      );
+    }
+
+    // 5. Collision Path Intersect Warning vs Unobtrusive Out-of-Path Dots
     for (final h in hazards) {
-      final isCritical = h.distanceMeters < 8.0;
-      final color = isCritical ? const Color(0xFFFF1744) : const Color(0xFF00E5FF);
+      final cx = ((h.xMin + h.xMax) * 0.5) * width;
+      final cy = ((h.yMin + h.yMax) * 0.5) * height;
+
+      if (!h.inTrajectoryPath) {
+        // Safe (outside trajectory path): faint, unobtrusive dot marker only
+        final dotPaint = Paint()..color = const Color(0x8800E5FF);
+        canvas.drawCircle(Offset(cx, cy), 4.0, dotPaint);
+        continue;
+      }
+
+      final isCritical = h.hazardType == 'pothole' && h.distanceMeters < 10.0;
+      final color = isCritical ? const Color(0xFFFF1744) : const Color(0xFF00E676);
 
       final rect = Rect.fromLTRB(
         h.xMin * width,
@@ -727,24 +751,29 @@ class TacticalHudPainter extends CustomPainter {
       final boxPaint = Paint()
         ..color = color
         ..style = PaintingStyle.stroke
-        ..strokeWidth = isCritical ? 3.5 : 2.0;
+        ..strokeWidth = isCritical ? 3.0 : 1.8;
       canvas.drawRect(rect, boxPaint);
 
-      final label = '${h.distanceMeters.toStringAsFixed(1)}m [${h.lane}]';
+      if (isCritical) {
+        // Impact target reticle
+        canvas.drawCircle(Offset(cx, cy), 10.0, boxPaint);
+      }
+
+      final label = 'POTHOLE ${h.distanceMeters.toStringAsFixed(1)}m';
       final textSpan = TextSpan(
         text: label,
         style: TextStyle(
-          color: color,
-          fontSize: isCritical ? 13 : 11,
+          color: Colors.white,
+          fontSize: 11,
           fontWeight: FontWeight.bold,
-          backgroundColor: Colors.black87,
+          backgroundColor: color,
         ),
       );
       final textPainter = TextPainter(
         text: textSpan,
         textDirection: TextDirection.ltr,
       )..layout();
-      textPainter.paint(canvas, Offset(rect.left, (rect.top - 18).clamp(0.0, height - 20)));
+      textPainter.paint(canvas, Offset(rect.left, (rect.top - 16).clamp(0.0, height - 20)));
     }
   }
 
