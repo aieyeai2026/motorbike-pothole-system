@@ -14,6 +14,16 @@ void main() {
   runApp(const MotorbikePotholeHudApp());
 }
 
+/// Speed-adaptive and thermal-aware target FPS controller (Phase 5 hardware safeguard).
+/// - Stopped (< 2 km/h): 0 FPS (pauses inference at red lights).
+/// - Thermal throttling active or slow city traffic (< 40 km/h): 10 FPS.
+/// - Cruising (>= 40 km/h): 30 FPS.
+int computeTargetFps({required double speedKmh, bool thermalModerate = false}) {
+  if (speedKmh < 2.0) return 0;
+  if (thermalModerate || speedKmh < 40.0) return 10;
+  return 30;
+}
+
 class MotorbikePotholeHudApp extends StatelessWidget {
   final List<PotholeHazard>? initialHazards;
   final int initialQueuedCount;

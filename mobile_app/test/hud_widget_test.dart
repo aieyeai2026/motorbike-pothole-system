@@ -63,4 +63,11 @@ void main() {
 
     expect(find.byKey(const Key('critical_hazard_banner')), findsNothing);
   });
+
+  test('T-5.2.1: computeTargetFps enforces speed-adaptive and thermal throttling', () {
+    expect(computeTargetFps(speedKmh: 0.0), 0);
+    expect(computeTargetFps(speedKmh: 22.0), 10);
+    expect(computeTargetFps(speedKmh: 55.0), 30);
+    expect(computeTargetFps(speedKmh: 55.0, thermalModerate: true), 10);
+  });
 }

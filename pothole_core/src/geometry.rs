@@ -85,6 +85,10 @@ pub fn compute_lane_centering(
     }
 }
 
+pub fn compensate_horizon_for_pitch(base_horizon_norm: f32, pitch_deg: f32) -> f32 {
+    (base_horizon_norm + pitch_deg * 0.006).clamp(0.15, 0.85)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,5 +125,17 @@ mod tests {
         let drift_right = compute_lane_centering(0.80, 0.0, 1.0, 3.6);
         assert_eq!(drift_right.status, CenteringStatus::DriftingRight);
         assert!(drift_right.offset_meters > 0.25);
+    }
+
+    #[test]
+    fn t_5_1_1_pitch_compensated_horizon_shifts_with_braking_and_clamps() {
+        let level = compensate_horizon_for_pitch(0.40, 0.0);
+        let nose_dive = compensate_horizon_for_pitch(0.40, -10.0); // braking pitch down shifts horizon up
+        let wheelie = compensate_horizon_for_pitch(0.40, 10.0);    // acceleration pitch up shifts horizon down
+        assert!((level - 0.40).abs() < 1e-5);
+        assert!(nose_dive < level);
+        assert!(wheelie > level);
+        assert!(compensate_horizon_for_pitch(0.40, -200.0) >= 0.15);
+        assert!(compensate_horizon_for_pitch(0.40, 200.0) <= 0.85);
     }
 }
