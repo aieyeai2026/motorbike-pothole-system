@@ -40,4 +40,27 @@ void main() {
     expect(find.byIcon(Icons.bolt), findsOneWidget);
     expect(find.byIcon(Icons.explore), findsOneWidget);
   });
+
+  testWidgets('T-4.4.1: HUD alerts only for pothole < 8m, not when only car is < 8m', (tester) async {
+    const closeCarOnly = PotholeHazard(
+      xMin: 0.40,
+      yMin: 0.70,
+      xMax: 0.60,
+      yMax: 0.90,
+      confidence: 0.93,
+      distanceMeters: 5.0,
+      severityScore: 6.5,
+      lane: 'CENTER',
+      classId: 1, // 1 = car
+    );
+
+    await tester.pumpWidget(
+      const MotorbikePotholeHudApp(
+        initialHazards: [closeCarOnly],
+        initialQueuedCount: 0,
+      ),
+    );
+
+    expect(find.byKey(const Key('critical_hazard_banner')), findsNothing);
+  });
 }

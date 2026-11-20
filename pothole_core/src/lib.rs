@@ -18,10 +18,22 @@ pub struct DetectedPothole {
     pub distance_meters: f32,
     pub lane: Lane,
     pub severity_score: f32,
+    pub class_id: i32,
 }
 
 pub fn process_detections(
     candidates: &[RawBoundingBox],
+    conf_threshold: f32,
+    iou_threshold: f32,
+    roi_horizon_norm: f32,
+    imu_z_peak_g: Option<f32>,
+) -> Vec<DetectedPothole> {
+    process_class_detections(candidates, 0, conf_threshold, iou_threshold, roi_horizon_norm, imu_z_peak_g)
+}
+
+pub fn process_class_detections(
+    candidates: &[RawBoundingBox],
+    class_id: i32,
     conf_threshold: f32,
     iou_threshold: f32,
     roi_horizon_norm: f32,
@@ -41,6 +53,7 @@ pub fn process_detections(
                 distance_meters: distance,
                 lane: classify_lane(b.x_center()),
                 severity_score: severity,
+                class_id,
             }
         })
         .collect()
