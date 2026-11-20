@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
+import 'package:sensors_plus/sensors_plus.dart';
 import 'package:sqflite/sqflite.dart';
 import 'local_db.dart';
 import 'rust_bridge.dart';
@@ -63,6 +65,21 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
   CameraController? _cameraController;
   Timer? _simTimer;
 
+  // Live Sensor Streams & Telemetry State (iPhone 12)
+  StreamSubscription<Position>? _positionSub;
+  StreamSubscription<UserAccelerometerEvent>? _accelSub;
+  StreamSubscription<GyroscopeEvent>? _gyroSub;
+
+  double _currentLat = 9.9312;
+  double _currentLon = 76.2673;
+  double _currentSpeedKmh = 0.0;
+  double _currentHeadingDeg = 0.0;
+  double _currentZAccelG = 1.0;
+  double _imuZPeakG = 1.0;
+  double _rollRateDegS = 0.0;
+  bool _gpsLocked = false;
+  bool _imuActive = false;
+
   List<PotholeHazard> _activeHazards = [];
   int _queuedCount = 0;
   final bool _simMode = true;
@@ -88,7 +105,7 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
       _rustBridge = RustPotholeBridge();
     } catch (_) {}
 
-    // 2. Initialize Camera Feed for Live View
+    // 2. Initialize Camera Feed for Live View (iPhone 12 Wide Lens)
     try {
       final cameras = await availableCameras();
       if (cameras.isNotEmpty) {
@@ -108,7 +125,65 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
       }
     } catch (_) {}
 
-    // 3. Initialize SQLite Offline Queue
+    // 3. Initialize iPhone 12 GPS & CoreLocation Telemetry
+    try {
+      LocationPermission perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied) {
+        perm = await Geolocator.requestPermission();
+      }
+      if (perm == LocationPermission.whileInUse || perm == LocationPermission.always) {
+        try {
+          final pos = await Geolocator.getCurrentPosition(
+            desiredAccuracy: LocationAccuracy.bestForNavigation,
+          ).timeout(const Duration(seconds: 4));
+          _currentLat = pos.latitude;
+          _currentLon = pos.longitude;
+          _currentSpeedKmh = pos.speed > 0 ? pos.speed * 3.6 : 0.0;
+          _currentHeadingDeg = pos.heading;
+          _gpsLocked = true;
+          if (mounted) setState(() {});
+        } catch (_) {}
+
+        _positionSub = Geolocator.getPositionStream(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.bestForNavigation,
+            distanceFilter: 1, // update every 1 meter
+          ),
+        ).listen((Position pos) {
+          if (mounted) {
+            setState(() {
+              _currentLat = pos.latitude;
+              _currentLon = pos.longitude;
+              _currentSpeedKmh = pos.speed > 0 ? pos.speed * 3.6 : 0.0;
+              _currentHeadingDeg = pos.heading;
+              _gpsLocked = true;
+            });
+          }
+        });
+      }
+    } catch (_) {}
+
+    // 4. Initialize iPhone 12 CoreMotion (IMU Accelerometer & Gyroscope)
+    try {
+      _accelSub = userAccelerometerEventStream().listen((UserAccelerometerEvent event) {
+        // Vertical shock: event.z in m/s^2 converted to G's
+        final shockG = 1.0 + (event.z.abs() / 9.80665);
+        if (shockG > _imuZPeakG) {
+          _imuZPeakG = shockG;
+        } else {
+          _imuZPeakG = (_imuZPeakG * 0.94) + (1.0 * 0.06);
+        }
+        _currentZAccelG = shockG;
+        _imuActive = true;
+        if (mounted) setState(() {});
+      });
+
+      _gyroSub = gyroscopeEventStream().listen((GyroscopeEvent event) {
+        _rollRateDegS = event.x * 180.0 / 3.14159265;
+      });
+    } catch (_) {}
+
+    // 5. Initialize SQLite Offline Queue
     try {
       final dbFolder = await getDatabasesPath();
       _localQueue = await LocalHazardQueue.open(p.join(dbFolder, 'pothole_hud.db'));
@@ -118,7 +193,7 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
       }
     } catch (_) {}
 
-    // 4. Start HUD Animation & Detection Loop
+    // 6. Start HUD Animation & Detection Loop
     _startSimulationLoop();
   }
 
@@ -141,13 +216,16 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
         detections = _rustBridge!.runYoloPostprocess(
           tensor: simTensor,
           numAnchors: 2,
-          imuZPeakG: 1.4,
+          imuZPeakG: _imuZPeakG,
         );
       } else {
-        // High-fidelity fallback simulated detection stream so HUD is active on all devices
+        // High-fidelity simulated detection stream fused with live iPhone 12 IMU shock
         final normY = (_simStep / 240.0);
         final dist1 = 28.0 * (1.0 - normY) + 3.8;
         final isCrit1 = dist1 < 8.0;
+
+        // Severity dynamically increases when phone detects real physical shock/bump
+        final dynamicSeverity = (isCrit1 ? 7.5 : 5.0) + ((_imuZPeakG - 1.0) * 3.0).clamp(0.0, 2.5);
 
         detections = [
           PotholeHazard(
@@ -157,7 +235,7 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
             yMax: (0.46 + normY * 0.48).clamp(0.0, 1.0),
             confidence: 0.93,
             distanceMeters: dist1,
-            severityScore: isCrit1 ? 8.8 : 6.5,
+            severityScore: double.parse(dynamicSeverity.toStringAsFixed(1)),
             lane: 'CENTER',
           ),
           if (dist1 > 12.0)
@@ -178,9 +256,9 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
         final top = detections.first;
         if (top.confidence >= 0.75) {
           final inserted = await _localQueue!.enqueueIfNotDuplicate(
-            latitude: 9.9312 + (_simStep * 0.00005),
-            longitude: 76.2673,
-            speedKmh: 48.0,
+            latitude: _currentLat,
+            longitude: _currentLon,
+            speedKmh: _currentSpeedKmh > 0 ? _currentSpeedKmh : 38.0,
             confidence: top.confidence,
             severityScore: top.severityScore,
             lanePosition: top.lane,
@@ -202,6 +280,9 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
   void dispose() {
     _simTimer?.cancel();
     _cameraController?.dispose();
+    _positionSub?.cancel();
+    _accelSub?.cancel();
+    _gyroSub?.cancel();
     super.dispose();
   }
 
@@ -414,7 +495,98 @@ class _PotholeHudScreenState extends State<PotholeHudScreen> {
                 ),
               ),
 
-            // 5. Road Centering & Ego Reticle Badge at Bottom Center
+            // 5. iPhone 12 Live Sensory Cockpit Readout Bar (GPS, Speed, IMU Shock, Compass)
+            Positioned(
+              top: isPortrait ? 98 : 58,
+              left: 16,
+              right: 16,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: const Color(0xDD070B12),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: const Color(0x5500E5FF)),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceAround,
+                  children: [
+                    // GPS Coordinates
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.location_on, size: 13, color: _gpsLocked ? const Color(0xFF00E676) : Colors.amber),
+                        const SizedBox(width: 4),
+                        Text(
+                          '${_currentLat.toStringAsFixed(4)}°, ${_currentLon.toStringAsFixed(4)}°',
+                          style: TextStyle(
+                            color: _gpsLocked ? const Color(0xFF00E676) : Colors.amber,
+                            fontSize: 11,
+                            fontFamily: 'monospace',
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                    // Live Speedometer (from GPS ground speed)
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.speed, size: 13, color: Color(0xFF00E5FF)),
+                        const SizedBox(width: 4),
+                        Text(
+                          '${_currentSpeedKmh.toStringAsFixed(0)} km/h',
+                          style: const TextStyle(
+                            color: Color(0xFF00E5FF),
+                            fontSize: 11,
+                            fontFamily: 'monospace',
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                    // IMU Vertical G-Force Shock (CoreMotion Z-axis)
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.bolt,
+                          size: 13,
+                          color: _currentZAccelG > 1.25 ? const Color(0xFFFF1744) : const Color(0xFF00E5FF),
+                        ),
+                        const SizedBox(width: 3),
+                        Text(
+                          '${_currentZAccelG.toStringAsFixed(2)}G',
+                          style: TextStyle(
+                            color: _currentZAccelG > 1.25 ? const Color(0xFFFF1744) : const Color(0xFF00E5FF),
+                            fontSize: 11,
+                            fontFamily: 'monospace',
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                    // Compass Bearing
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.explore, size: 13, color: Colors.white70),
+                        const SizedBox(width: 3),
+                        Text(
+                          '${_currentHeadingDeg.toStringAsFixed(0)}°',
+                          style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 11,
+                            fontFamily: 'monospace',
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+            // 6. Road Centering & Ego Reticle Badge at Bottom Center
             Positioned(
               bottom: 16,
               left: 0,
