@@ -70,6 +70,8 @@
 	<string>Camera access is required for real-time edge vision pothole and road obstacle detection.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Location access is required to tag road hazard events with accurate GPS coordinates.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>Motion sensor access is required to capture vertical suspension shock (Z-axis G-forces) and bike lean angle for pothole severity scoring.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Local network access is required to synchronize telemetry batches with your laptop server.</string>
 	<key>NSAppTransportSecurity</key>

@@ -27,4 +27,17 @@ void main() {
     expect(find.byKey(const Key('critical_hazard_banner')), findsOneWidget);
     expect(find.textContaining('QUEUED SQLITE: 3'), findsOneWidget);
   });
+
+  testWidgets('T-2.3.2: HUD renders live iPhone 12 telemetry sensory gauges', (tester) async {
+    await tester.pumpWidget(
+      const MotorbikePotholeHudApp(
+        initialQueuedCount: 0,
+      ),
+    );
+
+    expect(find.byIcon(Icons.location_on), findsOneWidget);
+    expect(find.byIcon(Icons.speed), findsOneWidget);
+    expect(find.byIcon(Icons.bolt), findsOneWidget);
+    expect(find.byIcon(Icons.explore), findsOneWidget);
+  });
 }
