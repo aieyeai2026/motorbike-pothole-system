@@ -124,6 +124,7 @@ class PotholeHazard {
   final double severityScore;
   final String lane;
   final int classId;
+  final bool inTrajectoryPath;
 
   const PotholeHazard({
     required this.xMin,
@@ -135,6 +136,7 @@ class PotholeHazard {
     required this.severityScore,
     required this.lane,
     this.classId = 0,
+    this.inTrajectoryPath = true,
   });
 
   String get hazardType {
@@ -257,6 +259,7 @@ class RustPotholeBridge {
       final results = <PotholeHazard>[];
       for (var i = 0; i < count; i++) {
         final item = (outPtr + i).ref;
+        final lane = PotholeHazard.laneFromCode(item.laneCode);
         results.add(
           PotholeHazard(
             xMin: item.xMin,
@@ -266,8 +269,9 @@ class RustPotholeBridge {
             confidence: item.confidence,
             distanceMeters: item.distanceMeters,
             severityScore: item.severityScore,
-            lane: PotholeHazard.laneFromCode(item.laneCode),
+            lane: lane,
             classId: item.classId,
+            inTrajectoryPath: lane == 'CENTER',
           ),
         );
       }

@@ -70,4 +70,49 @@ void main() {
     expect(computeTargetFps(speedKmh: 55.0), 30);
     expect(computeTargetFps(speedKmh: 55.0, thermalModerate: true), 10);
   });
+
+  testWidgets('T-6.2.1: Phase 6 HUD alerts only when pothole < 10m is inside trajectory path', (tester) async {
+    const outOfPathPothole = PotholeHazard(
+      xMin: 0.15,
+      yMin: 0.72,
+      xMax: 0.25,
+      yMax: 0.80,
+      confidence: 0.91,
+      distanceMeters: 6.2,
+      severityScore: 7.4,
+      lane: 'LEFT',
+      classId: 0,
+      inTrajectoryPath: false,
+    );
+
+    await tester.pumpWidget(
+      const MotorbikePotholeHudApp(
+        initialHazards: [outOfPathPothole],
+        initialQueuedCount: 1,
+      ),
+    );
+    expect(find.byKey(const Key('critical_hazard_banner')), findsNothing);
+
+    const inPathPothole = PotholeHazard(
+      xMin: 0.45,
+      yMin: 0.74,
+      xMax: 0.55,
+      yMax: 0.82,
+      confidence: 0.92,
+      distanceMeters: 6.4,
+      severityScore: 8.1,
+      lane: 'CENTER',
+      classId: 0,
+      inTrajectoryPath: true,
+    );
+
+    await tester.pumpWidget(
+      const MotorbikePotholeHudApp(
+        initialHazards: [inPathPothole],
+        initialQueuedCount: 1,
+      ),
+    );
+    expect(find.byKey(const Key('critical_hazard_banner')), findsOneWidget);
+    expect(find.textContaining('POTHOLE IN PATH: 6.4m'), findsOneWidget);
+  });
 }
