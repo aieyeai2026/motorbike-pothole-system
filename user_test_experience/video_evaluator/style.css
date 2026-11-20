@@ -339,3 +339,141 @@ video {
   min-width: 88px;
   font-weight: 700;
 }
+
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 11px;
+}
+
+.telemetry-bar.telemetry-dimmed {
+  opacity: 0.25;
+}
+
+.layer-toggles-bar {
+  padding: 10px 20px;
+  background: #0c1320;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.layer-toggles-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.layer-section-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.7px;
+  color: var(--text-muted);
+}
+
+.layer-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.layer-toggle-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 8px;
+}
+
+.toggle-chip {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 6px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+}
+
+.toggle-chip:hover {
+  border-color: var(--cyan);
+}
+
+.layer-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.dot-horizon { background: #00e676; }
+.dot-boundaries { background: #00e5ff; }
+.dot-carpet { background: #26ff9c; }
+.dot-potholes { background: #2979ff; }
+.dot-ticks { background: #ffd700; }
+.dot-telemetry { background: #90a4ae; }
+
+.toggle-text {
+  flex: 1;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 34px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-slider {
+  position: absolute;
+  inset: 0;
+  background-color: #25334a;
+  border-radius: 18px;
+  transition: background-color 0.16s ease;
+}
+
+.toggle-slider::before {
+  content: "";
+  position: absolute;
+  height: 14px;
+  width: 14px;
+  left: 2px;
+  bottom: 2px;
+  background-color: #e6f1ff;
+  border-radius: 50%;
+  transition: transform 0.16s ease;
+}
+
+.toggle-switch input:checked + .toggle-slider {
+  background-color: var(--cyan);
+}
+
+.toggle-switch input:checked + .toggle-slider::before {
+  transform: translateX(16px);
+  background-color: #041019;
+}
+
+.hud-overlay-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.hud-overlay-canvas.hidden {
+  display: none;
+}

@@ -718,7 +718,7 @@ class TacticalHudPainter extends CustomPainter {
     for (var i = 0; i <= steps; i++) {
       final t = i / steps;
       final yn = yVpNorm + (bottomNorm - yVpNorm) * t;
-      final curveBias = kappaRoad * math.sin(math.pi * t);
+      final curveBias = kappaRoad * t * math.sin(math.pi * t);
       final xl = (xVpNorm + (xLeftBotNorm - xVpNorm) * math.pow(t, 1.3) + curveBias) * width;
       final xr = (xVpNorm + (xRightBotNorm - xVpNorm) * math.pow(t, 1.3) + curveBias) * width;
       final py = yn * height;
