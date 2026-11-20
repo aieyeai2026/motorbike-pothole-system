@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Motorbike Vision Model Evaluator — Dual Video & Rust C-ABI Pipeline</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="top-bar">
+    <div class="brand">
+      <span class="badge-live">RUST C-ABI FFI</span>
+      <h1>Motorbike Vision Evaluator — Synchronized Dual-Video Workbench</h1>
+    </div>
+    <div class="top-actions">
+      <button id="preset-rust-ffi-btn" class="btn btn-accent" title="Run real Rust C-ABI pipeline on benchmarks/fixtures/ride_test.mp4">
+        ⚡ Process &amp; Load Benchmark (ride_test.mp4)
+      </button>
+      <button id="curtain-toggle-btn" class="btn btn-outline">
+        ⇔ Toggle Curtain Slider Mode
+      </button>
+    </div>
+  </header>
+
+  <!-- Live Synchronized Telemetry & Evaluation HUD Bar -->
+  <section class="telemetry-bar">
+    <div class="metric-card">
+      <span class="metric-label">TIMECODE &amp; FRAME</span>
+      <span id="timecode-display" class="metric-value mono">00:00:00:00 | Frame 0</span>
+    </div>
+    <div class="metric-card">
+      <span class="metric-label">HAZARD DETECTIONS</span>
+      <span id="metric-hazard-count" class="metric-value mono">0</span>
+    </div>
+    <div class="metric-card">
+      <span class="metric-label">CLOSEST POTHOLE / OBSTACLE</span>
+      <span id="metric-closest-distance" class="metric-value mono">-- m</span>
+    </div>
+    <div class="metric-card">
+      <span class="metric-label">ASSIGNED LANE &amp; EGO</span>
+      <span id="metric-assigned-lane" class="metric-value mono">CENTER</span>
+    </div>
+    <div class="metric-card">
+      <span class="metric-label">PIPELINE FPS / LATENCY</span>
+      <span id="metric-fps-latency" class="metric-value mono">-- FPS / -- ms</span>
+    </div>
+  </section>
+
+  <!-- Upload & Live Processing Bar -->
+  <section class="upload-bar" id="drop-zone">
+    <div class="upload-group">
+      <label class="file-label" for="raw-file-input">
+        📂 1. Select Raw Road Video (.mp4 / .mov)
+        <input type="file" id="raw-file-input" accept="video/*" />
+      </label>
+      <button id="process-upload-btn" class="btn btn-primary">
+        🚀 Run Real Rust Pipeline on Uploaded Video
+      </button>
+    </div>
+    <div class="upload-group">
+      <label class="file-label" for="hud-file-input">
+        📂 Optional: Load Existing HUD Output Video
+        <input type="file" id="hud-file-input" accept="video/*" />
+      </label>
+      <span id="pipeline-status" class="status-pill">Ready — Upload a video or click Process Benchmark</span>
+    </div>
+  </section>
+
+  <!-- Dual Video Player Container (Side-by-Side or Curtain Mode) -->
+  <main id="player-container" class="player-grid side-by-side">
+    <div class="video-panel" id="panel-raw">
+      <div class="panel-header">
+        <span class="panel-tag">LEFT PANEL • RAW INPUT FEED</span>
+        <span id="raw-meta" class="panel-meta">No file loaded</span>
+      </div>
+      <div class="video-stage">
+        <video id="video-raw" playsinline preload="auto"></video>
+      </div>
+    </div>
+
+    <div class="video-panel" id="panel-hud">
+      <div class="panel-header">
+        <span class="panel-tag tag-cyan">RIGHT PANEL • HUD INFERENCE OUTPUT (RUST C-ABI)</span>
+        <span id="hud-meta" class="panel-meta">Awaiting pipeline execution</span>
+      </div>
+      <div class="video-stage">
+        <video id="video-hud" playsinline preload="auto" muted></video>
+      </div>
+    </div>
+
+    <!-- Interactive Curtain Comparison Slider Control (visible in Curtain Mode) -->
+    <div id="curtain-control-wrap" class="curtain-control hidden">
+      <label for="curtain-slider">Curtain Split Alignment:</label>
+      <input type="range" id="curtain-slider" min="0" max="100" value="50" step="0.5" />
+      <span id="curtain-pct-label">50%</span>
+    </div>
+  </main>
+
+  <!-- Master Synchronized Playback Controls -->
+  <footer class="controls-bar">
+    <div class="transport-buttons">
+      <button id="step-back-btn" class="btn btn-icon" title="Step Backward 1 Frame (Left Arrow)">⏮ -1F</button>
+      <button id="play-pause-btn" class="btn btn-play" title="Master Play / Pause (Spacebar)">▶ Play</button>
+      <button id="step-fwd-btn" class="btn btn-icon" title="Step Forward 1 Frame (Right Arrow)">+1F ⏭</button>
+    </div>
+
+    <div class="scrubber-wrap">
+      <input type="range" id="timeline-scrubber" min="0" max="100" value="0" step="0.001" />
+    </div>
+
+    <div class="speed-wrap">
+      <label for="speed-selector">Speed:</label>
+      <select id="speed-selector">
+        <option value="0.25">0.25x (Slow-Mo)</option>
+        <option value="0.5">0.5x</option>
+        <option value="1" selected>1.0x (Normal)</option>
+        <option value="2">2.0x</option>
+      </select>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
