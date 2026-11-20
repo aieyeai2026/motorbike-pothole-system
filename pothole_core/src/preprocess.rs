@@ -40,6 +40,39 @@ pub fn compute_severity_score(
     (area_component + proximity_factor + imu_spike).clamp(0.0, 10.0)
 }
 
+/// Filters out steady-state high-frequency engine harmonic vibration from an accelerometer
+/// window and returns the true suspension impact peak in G-force (`>= 1.0`).
+pub fn filter_imu_engine_vibration(samples_g: &[f32]) -> f32 {
+    if samples_g.is_empty() {
+        return 1.0;
+    }
+    let mut sorted: Vec<f32> = samples_g.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = sorted[sorted.len() / 2];
+    let peak = sorted.last().copied().unwrap_or(1.0);
+    (1.0 + (peak - median).max(0.0)).max(1.0)
+}
+
+/// Rejects false-positive pothole triggers identified in field footage (`VIDEO_ANALYSIS_PHASE5.md`):
+/// - Painted crosswalk stripes / elongated markings (`w / h > 5.5`).
+/// - Low-confidence canopy shadows (`conf < 0.60`) with flat IMU (`<= 1.05G`).
+pub fn is_likely_false_positive_pothole(
+    box_w_norm: f32,
+    box_h_norm: f32,
+    imu_z_peak_g: Option<f32>,
+    confidence: f32,
+) -> bool {
+    let aspect = box_w_norm / box_h_norm.max(1e-4);
+    if aspect > 5.5 {
+        return true;
+    }
+    let imu_g = imu_z_peak_g.unwrap_or(1.0);
+    if confidence < 0.60 && imu_g <= 1.05 {
+        return true;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,5 +101,25 @@ mod tests {
         assert!(visual_only >= 0.0 && visual_only <= 10.0);
         assert!(with_imu_impact > visual_only);
         assert_eq!(extreme_max, 10.0);
+    }
+
+    #[test]
+    fn t_5_1_2_imu_engine_vibration_filter_and_fp_suppression() {
+        // Steady high-frequency engine buzz oscillating around 1.35G produces minimal transient impulse (~1.0G)
+        let engine_buzz = vec![1.34, 1.36, 1.35, 1.34, 1.36, 1.35];
+        let filtered_buzz = filter_imu_engine_vibration(&engine_buzz);
+        assert!(filtered_buzz < 1.15);
+
+        // Real pothole suspension spike (2.4G) on top of 1.1G baseline passes through
+        let pothole_hit = vec![1.10, 1.12, 1.09, 2.45, 1.15, 1.10];
+        let filtered_hit = filter_imu_engine_vibration(&pothole_hit);
+        assert!(filtered_hit > 1.80);
+
+        // False-positive suppression: zebra crosswalk stripe (wide aspect ratio w/h > 5.5) is rejected
+        assert!(is_likely_false_positive_pothole(0.60, 0.08, Some(1.02), 0.75));
+        // Low-confidence canopy shadow (<0.60) with flat IMU (<=1.05G) is rejected
+        assert!(is_likely_false_positive_pothole(0.20, 0.15, Some(1.01), 0.54));
+        // True pothole with normal aspect ratio and high confidence is kept
+        assert!(!is_likely_false_positive_pothole(0.22, 0.16, Some(1.75), 0.89));
     }
 }
