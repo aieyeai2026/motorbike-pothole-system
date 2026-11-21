@@ -21,7 +21,9 @@ import math
 import mimetypes
 import os
 import re
+import shutil
 import subprocess
+import sys
 import time
 import uuid
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -42,7 +44,19 @@ EVAL_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(EVAL_DIR, "..", ".."))
 FIXTURES_DIR = os.path.join(REPO_ROOT, "benchmarks", "fixtures")
 UPLOADS_DIR = os.path.join(FIXTURES_DIR, "uploaded_evals")
-LIB_PATH = os.path.join(REPO_ROOT, "pothole_core", "target", "release", "libpothole_core.dylib")
+
+
+def _find_rust_lib() -> str:
+    target_dir = os.path.join(REPO_ROOT, "pothole_core", "target", "release")
+    for name in ("libpothole_core.dylib", "libpothole_core.so", "pothole_core.dll"):
+        candidate = os.path.join(target_dir, name)
+        if os.path.exists(candidate):
+            return candidate
+    ext = "dylib" if sys.platform == "darwin" else ("dll" if sys.platform == "win32" else "so")
+    return os.path.join(target_dir, f"libpothole_core.{ext}")
+
+
+LIB_PATH = _find_rust_lib()
 
 
 class CDetectedPothole(ctypes.Structure):
@@ -1281,21 +1295,42 @@ def process_video_through_rust_pipeline(
     cap.release()
     writer.release()
 
-    if convert_h264 and os.path.exists("/usr/bin/avconvert"):
-        res = subprocess.run(
-            [
-                "/usr/bin/avconvert",
-                "--source", tmp_raw_out,
-                "--preset", "PresetHighestQuality",
-                "--output", output_path,
-                "--replace",
-            ],
-            capture_output=True,
-        )
-        if res.returncode == 0 and os.path.exists(output_path):
-            os.remove(tmp_raw_out)
+    if convert_h264:
+        ffmpeg_bin = shutil.which("ffmpeg")
+        if os.path.exists("/usr/bin/avconvert"):
+            res = subprocess.run(
+                [
+                    "/usr/bin/avconvert",
+                    "--source", tmp_raw_out,
+                    "--preset", "PresetHighestQuality",
+                    "--output", output_path,
+                    "--replace",
+                ],
+                capture_output=True,
+            )
+            if res.returncode == 0 and os.path.exists(output_path):
+                os.remove(tmp_raw_out)
+            else:
+                os.replace(tmp_raw_out, output_path)
+        elif ffmpeg_bin:
+            res = subprocess.run(
+                [
+                    ffmpeg_bin,
+                    "-y",
+                    "-i", tmp_raw_out,
+                    "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p",
+                    output_path,
+                ],
+                capture_output=True,
+            )
+            if res.returncode == 0 and os.path.exists(output_path):
+                os.remove(tmp_raw_out)
+            else:
+                os.replace(tmp_raw_out, output_path)
         else:
-            os.replace(tmp_raw_out, output_path)
+            if os.path.exists(tmp_raw_out):
+                os.replace(tmp_raw_out, output_path)
 
     return {
         "output_path": output_path,
@@ -1506,7 +1541,11 @@ class VideoEvalRequestHandler(SimpleHTTPRequestHandler):
                     self.wfile.write(chunk)
 
 
-def run_server(host: str = "127.0.0.1", port: int = 8085) -> None:
+def run_server(host: Optional[str] = None, port: Optional[int] = None) -> None:
+    if host is None:
+        host = os.environ.get("HOST", "0.0.0.0")
+    if port is None:
+        port = int(os.environ.get("PORT", "8085"))
     server = ThreadingHTTPServer((host, port), VideoEvalRequestHandler)
     print("============================================================")
     print("Motorbike Vision Model Evaluator (Phase 6 AR HUD Pipeline):")
@@ -1521,8 +1560,10 @@ def run_server(host: str = "127.0.0.1", port: int = 8085) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run local Video Evaluator HTTP server")
-    parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=8085, help="Bind port (default: 8085)")
+    env_host = os.environ.get("HOST", "0.0.0.0")
+    env_port = int(os.environ.get("PORT", "8085"))
+    parser = argparse.ArgumentParser(description="Run Video Evaluator HTTP server")
+    parser.add_argument("--host", default=env_host, help=f"Bind host (default: {env_host})")
+    parser.add_argument("--port", type=int, default=env_port, help=f"Bind port (default: {env_port})")
     args = parser.parse_args()
     run_server(args.host, args.port)

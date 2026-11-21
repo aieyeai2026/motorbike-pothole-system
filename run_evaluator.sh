@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
-# One-shot launcher for the video evaluator. Usage:  bash run_evaluator.sh
+# One-shot launcher for the video evaluator (Local & Cloud).
+# Usage:  bash run_evaluator.sh
+#
+# GOOGLE CLOUD DEPLOYMENT (Live Link on Port 8085):
+# 1. Cloud Shell Web Preview:
+#    - Upload deploy_package.zip or clone repo
+#    - Run: bash run_evaluator.sh
+#    - Click Web Preview icon -> "Preview on port 8085" -> Instant Live URL
+# 2. Google Cloud Run (Permanent URL):
+#    - gcloud run deploy pothole-evaluator --source . --port 8085 --memory 2Gi --cpu 2 --allow-unauthenticated
 set -e
 cd "$(dirname "$0")"
-PORT=8085
+PORT="${PORT:-8085}"
+HOST="${HOST:-0.0.0.0}"
 
 # 1. stop any old evaluator still holding the port (this is what keeps serving the stale page)
 if lsof -ti tcp:$PORT >/dev/null 2>&1; then
@@ -18,9 +28,15 @@ PY
 
 # 3. required files
 [ -f user_test_experience/video_evaluator/models/pyresearch_pothole_best.pt ] || echo "NOTE: weights missing; they will be downloaded from the pyresearch repo on first run"
-[ -f pothole_core/target/release/libpothole_core.dylib ] || { echo "Rust lib missing -> building"; cargo build --release --manifest-path pothole_core/Cargo.toml; }
+if [ ! -f pothole_core/target/release/libpothole_core.dylib ] && [ ! -f pothole_core/target/release/libpothole_core.so ]; then
+  echo "Rust shared library missing -> building with cargo"
+  cargo build --release --manifest-path pothole_core/Cargo.toml
+fi
 
-# 4. run (open the browser a moment after the server starts)
-( sleep 3 && open "http://127.0.0.1:$PORT/" ) >/dev/null 2>&1 &
-echo "Evaluator on http://127.0.0.1:$PORT/  (Ctrl+C to stop). Re-upload the video: old processed output used the old threshold."
-exec python3 user_test_experience/video_evaluator/server.py
+# 4. run (open browser if running in GUI desktop environment)
+if command -v open >/dev/null 2>&1; then
+  ( sleep 3 && open "http://127.0.0.1:$PORT/" ) >/dev/null 2>&1 &
+fi
+
+echo "Evaluator on http://${HOST}:${PORT}/ (Ctrl+C to stop)."
+exec python3 user_test_experience/video_evaluator/server.py --host "$HOST" --port "$PORT"

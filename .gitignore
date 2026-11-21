@@ -5,3 +5,8 @@
 uploads/
 *.db
 *.pt
+*.zip
+*.png
+benchmarks/fixtures/uploaded_evals/*.mp4
+benchmarks/fixtures/uploaded_evals/*.raw.mp4
+benchmarks/fixtures/phase8_verification/*.jpg
