@@ -836,46 +836,78 @@ def compute_perspective_distance_ticks(
     y_bot: float = 0.88,
 ) -> List[Dict[str, float]]:
     """
-    Computes perspective horizontal distance tick coordinates (`5m`, `10m`, `15m`, `20m`)
-    spanning the trajectory corridor so they can render independently of carpet visibility.
+    Computes perspective horizontal distance tick coordinates (5m, 10m, 15m, 20m) using the
+    exact inverse of `pothole_core::geometry::estimate_distance_meters`:
+        road_progress = ((1 - curved) ** (1/0.65))
+        y = horizon + road_progress * (1 - horizon)
+    where curved = (d - 2) / 28  and horizon = y_vp.
+    This keeps tick positions pixel-accurate with the per-box distance labels.
+    The x-extent is taken from the measured road boundary edges (or carpet as fallback).
     """
     ticks: List[Dict[str, float]] = []
-    c_ys = carpet_data.get("carpet_ys", [])
-    c_lxs = carpet_data.get("carpet_left_xs", [])
-    c_rxs = carpet_data.get("carpet_right_xs", [])
+
+    # Sorted ascending (horizon → bottom) for np.interp
     b_ys = carpet_data.get("bound_ys", [])
     b_lxs = carpet_data.get("left_bound_xs", [])
     b_rxs = carpet_data.get("right_bound_xs", [])
+    c_ys = carpet_data.get("carpet_ys", [])
+    c_lxs = carpet_data.get("carpet_left_xs", [])
+    c_rxs = carpet_data.get("carpet_right_xs", [])
 
-    inc_c_ys = c_ys[::-1] if (len(c_ys) >= 2 and c_ys[0] > c_ys[-1]) else c_ys
-    inc_c_lxs = c_lxs[::-1] if (len(c_ys) >= 2 and c_ys[0] > c_ys[-1]) else c_lxs
-    inc_c_rxs = c_rxs[::-1] if (len(c_ys) >= 2 and c_ys[0] > c_ys[-1]) else c_rxs
+    # road_edges from RoadBoundaryTracker take priority (most accurate)
+    road_edges = carpet_data.get("road_edges")
 
-    span_y = max(0.05, y_bot - y_vp)
-    y_target_limit = float(carpet_data.get("y_target_norm", y_vp + 0.02)) - 0.005
+    # Build ascending edge arrays for interpolation
+    if road_edges:
+        edges = list(road_edges.values())
+        edge_ys_l = edges[0]["ys"] if edges else []
+        edge_xs_l = edges[0]["xs"] if edges else []
+        edge_ys_r = edges[1]["ys"] if len(edges) > 1 else edge_ys_l
+        edge_xs_r = edges[1]["xs"] if len(edges) > 1 else edge_xs_l
+        # Ensure ascending y
+        if len(edge_ys_l) >= 2 and edge_ys_l[0] > edge_ys_l[-1]:
+            edge_ys_l, edge_xs_l = edge_ys_l[::-1], edge_xs_l[::-1]
+        if len(edge_ys_r) >= 2 and edge_ys_r[0] > edge_ys_r[-1]:
+            edge_ys_r, edge_xs_r = edge_ys_r[::-1], edge_xs_r[::-1]
+    else:
+        edge_ys_l = edge_xs_l = edge_ys_r = edge_xs_r = []
+
+    if len(c_ys) >= 2 and c_ys[0] > c_ys[-1]:
+        c_ys, c_lxs, c_rxs = c_ys[::-1], c_lxs[::-1], c_rxs[::-1]
+
+    horizon = float(np.clip(y_vp, 0.05, 0.90))
+
     for dist_m in (5.0, 10.0, 15.0, 20.0):
-        t_d = float(np.clip(((28.0 - (dist_m - 2.0)) / 28.0) ** (1.0 / 0.65), 0.10, 0.92))
-        y_d = y_vp + t_d * span_y
-        if y_d < y_target_limit:
+        # Exact inverse of estimate_distance_meters (matches Rust geometry.rs)
+        curved = (dist_m - 2.0) / 28.0
+        road_progress = float(np.clip(1.0 - curved, 0.0, 1.0)) ** (1.0 / 0.65)
+        y_d = float(np.clip(horizon + road_progress * (1.0 - horizon), horizon, 1.0))
+
+        # Skip ticks that land above the visible road area
+        if y_d < y_vp + 0.01:
             continue
-        if len(inc_c_ys) >= 2 and y_d >= inc_c_ys[0] - 0.01:
-            lx_d = float(np.interp(y_d, inc_c_ys, inc_c_lxs))
-            rx_d = float(np.interp(y_d, inc_c_ys, inc_c_rxs))
+
+        # X-extent: prefer road boundary edges → carpet → fallback
+        if edge_ys_l and len(edge_ys_l) >= 2 and y_d <= edge_ys_l[-1] + 0.02:
+            lx_d = float(np.interp(y_d, edge_ys_l, edge_xs_l))
+            rx_d = float(np.interp(y_d, edge_ys_r, edge_xs_r))
+        elif len(c_ys) >= 2 and y_d <= c_ys[-1] + 0.02:
+            lx_d = float(np.interp(y_d, c_ys, c_lxs))
+            rx_d = float(np.interp(y_d, c_ys, c_rxs))
         elif len(b_ys) >= 2:
-            bl = float(np.interp(y_d, b_ys, b_lxs))
-            br = float(np.interp(y_d, b_ys, b_rxs))
-            half_w = max(0.012, 0.5 * (0.02 + (0.18 - 0.02) * t_d))
-            mid = float(np.clip(carpet_data.get("target_gap_x", 0.50), bl + half_w, br - half_w))
-            lx_d, rx_d = mid - half_w, mid + half_w
+            lx_d = float(np.interp(y_d, b_ys, b_lxs))
+            rx_d = float(np.interp(y_d, b_ys, b_rxs))
         else:
-            half_w = max(0.012, 0.5 * (0.02 + (0.18 - 0.02) * t_d))
-            lx_d, rx_d = 0.50 - half_w, 0.50 + half_w
+            # bare fallback: narrow band centred at vanishing-point x
+            half_w = max(0.015, 0.09 * road_progress)
+            mid = float(carpet_data.get("target_gap_x", 0.50))
+            lx_d, rx_d = mid - half_w, mid + half_w
 
         ticks.append({
             "distance_m": int(dist_m),
             "y_norm": round(float(y_d), 4),
-            "x_left_norm": round(float(lx_d), 4),
-            "x_right_norm": round(float(rx_d), 4),
+            "x_left_norm": round(float(np.clip(lx_d, 0.01, 0.98)), 4),
+            "x_right_norm": round(float(np.clip(rx_d, 0.02, 0.99)), 4),
         })
     return ticks
 
