@@ -515,11 +515,56 @@
     }
   });
 
+  async function parseJsonResponse(resp) {
+    const text = await resp.text();
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch (_err) {
+      const preview = (text || resp.statusText || "Server error").trim().slice(0, 140);
+      throw new Error(`HTTP ${resp.status}: ${preview}`);
+    }
+    if (!resp.ok) {
+      throw new Error((data && data.error) || `HTTP ${resp.status}: ${resp.statusText || "Request failed"}`);
+    }
+    return data;
+  }
+
+  async function pollEvalJob(jobId, label) {
+    while (true) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      const pollResp = await fetch(`/api/job/${encodeURIComponent(jobId)}`, { cache: "no-store" });
+      const data = await parseJsonResponse(pollResp);
+      if (data.status === "done") {
+        return data;
+      }
+      if (data.status === "error") {
+        throw new Error(data.error || "Pipeline execution failed");
+      }
+      const total = data.total_frames ? `/${data.total_frames}` : "";
+      pipelineStatus.textContent = `⏳ Processing ${label}: frame ${data.frames_done || 0}${total}...`;
+    }
+  }
+
+  function applyCompletedResult(data, rawLabel, hudLabel, statusMsg) {
+    videoFps = data.fps || 30.0;
+    telemetryByFrame = data.telemetry || [];
+    videoRaw.src = data.raw_url;
+    videoHud.src = data.hud_url;
+    rawMeta.textContent = rawLabel;
+    hudMeta.textContent = hudLabel;
+    pipelineStatus.textContent = statusMsg;
+    videoRaw.currentTime = 0;
+    videoHud.currentTime = 0;
+    updateTelemetryForTime(0);
+    renderLiveHudCanvas(0);
+  }
+
   async function runPipelineOnUploadedFile(file) {
-    pipelineStatus.textContent = `⏳ Running YOLOv8 @ 0.45 + Rust C-ABI pipeline on ${file.name}...`;
+    pipelineStatus.textContent = `⏳ Uploading ${file.name} and starting YOLOv8 @ 0.45 + Rust C-ABI pipeline...`;
     processUploadBtn.disabled = true;
     try {
-      const resp = await fetch("/api/process-video", {
+      const resp = await fetch("/api/process-video-async", {
         method: "POST",
         headers: {
           "Content-Type": "application/octet-stream",
@@ -529,20 +574,14 @@
         },
         body: file,
       });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || "Pipeline execution failed");
-
-      videoFps = data.fps || 30.0;
-      telemetryByFrame = data.telemetry || [];
-      videoRaw.src = data.raw_url;
-      videoHud.src = data.hud_url;
-      rawMeta.textContent = `${file.name} (${data.frames_processed} frames)`;
-      hudMeta.textContent = `YOLOv8 @ 0.45 + Rust C-ABI (${data.frames_processed} frames @ ${videoFps.toFixed(1)} FPS)`;
-      pipelineStatus.textContent = `✓ Processed ${data.frames_processed} frames through PyResearch + libpothole_core.dylib`;
-      videoRaw.currentTime = 0;
-      videoHud.currentTime = 0;
-      updateTelemetryForTime(0);
-      renderLiveHudCanvas(0);
+      const queued = await parseJsonResponse(resp);
+      const data = queued.status === "done" ? queued : await pollEvalJob(queued.job_id, file.name);
+      applyCompletedResult(
+        data,
+        `${file.name} (${data.frames_processed} frames)`,
+        `YOLOv8 @ 0.45 + Rust C-ABI (${data.frames_processed} frames @ ${videoFps.toFixed(1)} FPS)`,
+        `✓ Processed ${data.frames_processed} frames through PyResearch + Rust FFI`,
+      );
     } catch (err) {
       pipelineStatus.textContent = `✗ Error: ${err.message}`;
     } finally {
@@ -559,30 +598,24 @@
   });
 
   presetRustFfiBtn.addEventListener("click", async () => {
-    pipelineStatus.textContent = "⏳ Running YOLOv8 @ 0.45 + Rust C-ABI pipeline on benchmarks/fixtures/ride_test.mp4...";
+    pipelineStatus.textContent = "⏳ Starting YOLOv8 @ 0.45 + Rust C-ABI pipeline on benchmarks/fixtures/ride_test.mp4...";
     presetRustFfiBtn.disabled = true;
     try {
-      const resp = await fetch("/api/process-fixture", {
+      const resp = await fetch("/api/process-fixture-async", {
         method: "POST",
         headers: {
           "X-Conf-Threshold": String(YOLO_CONF),
           "X-Hud-Layers": JSON.stringify(layerState),
         },
       });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || "Fixture processing failed");
-
-      videoFps = data.fps || 30.0;
-      telemetryByFrame = data.telemetry || [];
-      videoRaw.src = data.raw_url;
-      videoHud.src = data.hud_url;
-      rawMeta.textContent = "benchmarks/fixtures/ride_test.mp4";
-      hudMeta.textContent = `Live YOLOv8 @ 0.45 + Rust C-ABI (${data.frames_processed} frames)`;
-      pipelineStatus.textContent = `✓ Processed ${data.frames_processed} frames from ride_test.mp4 via libpothole_core.dylib`;
-      videoRaw.currentTime = 0;
-      videoHud.currentTime = 0;
-      updateTelemetryForTime(0);
-      renderLiveHudCanvas(0);
+      const queued = await parseJsonResponse(resp);
+      const data = queued.status === "done" ? queued : await pollEvalJob(queued.job_id, "ride_test.mp4");
+      applyCompletedResult(
+        data,
+        "benchmarks/fixtures/ride_test.mp4",
+        `Live YOLOv8 @ 0.45 + Rust C-ABI (${data.frames_processed} frames)`,
+        `✓ Processed ${data.frames_processed} frames from ride_test.mp4 via Rust FFI`,
+      );
     } catch (err) {
       pipelineStatus.textContent = `✗ Error: ${err.message}`;
     } finally {

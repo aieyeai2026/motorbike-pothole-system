@@ -4,8 +4,10 @@
 #   gcloud run deploy pothole-evaluator \
 #     --source . \
 #     --port 8085 \
-#     --memory 2Gi \
+#     --memory 4Gi \
 #     --cpu 2 \
+#     --timeout 900 \
+#     --no-cpu-throttling \
 #     --allow-unauthenticated \
 #     --region us-central1
 # ==============================================================================
@@ -44,6 +46,8 @@ RUN mkdir -p /app/benchmarks/fixtures/uploaded_evals
 
 ENV PORT=8085
 ENV HOST=0.0.0.0
+ENV OMP_NUM_THREADS=2
+ENV MKL_NUM_THREADS=2
 EXPOSE 8085
 
 CMD ["python3", "user_test_experience/video_evaluator/server.py"]

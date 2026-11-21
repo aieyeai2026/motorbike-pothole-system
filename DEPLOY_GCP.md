@@ -53,8 +53,10 @@ cd pothole-evaluator
 gcloud run deploy pothole-evaluator \
   --source . \
   --port 8085 \
-  --memory 2Gi \
+  --memory 4Gi \
   --cpu 2 \
+  --timeout 900 \
+  --no-cpu-throttling \
   --allow-unauthenticated \
   --region us-central1
 ```
