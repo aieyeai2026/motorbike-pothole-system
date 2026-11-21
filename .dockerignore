@@ -1,0 +1,11 @@
+.git
+.github
+.agents
+mobile_app
+pothole-sync-backend
+pothole_core/target
+benchmarks/fixtures/uploaded_evals/*.mp4
+benchmarks/fixtures/uploaded_evals/*.raw.mp4
+**/__pycache__
+*.pyc
+*.png
