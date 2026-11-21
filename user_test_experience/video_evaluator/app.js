@@ -1,4 +1,6 @@
 (() => {
+  // Raw YOLOv8 confidence gate; must match DEFAULT_CONF_THRESHOLD in pyresearch_pothole_detector.py
+  const YOLO_CONF = 0.45;
   const videoRaw = document.getElementById("video-raw");
   const videoHud = document.getElementById("video-hud");
   const playPauseBtn = document.getElementById("play-pause-btn");
@@ -34,6 +36,7 @@
   const layerCheckboxes = document.querySelectorAll(".layer-checkbox");
   const layersAllOnBtn = document.getElementById("layers-all-on-btn");
   const layersPotholesOnlyBtn = document.getElementById("layers-potholes-only-btn");
+  const layersBoundariesOnlyBtn = document.getElementById("layers-boundaries-only-btn");
   const layersAllOffBtn = document.getElementById("layers-all-off-btn");
 
   const layerState = {
@@ -163,27 +166,25 @@
       hudCtx.restore();
     }
 
-    // Layer 3: Curved Cyan Road Boundaries
-    if (layerState.boundaries && Array.isArray(t.bound_ys) && t.bound_ys.length > 1) {
+    // Layer 3: Curved Cyan Road Boundaries (measured road edges; falls back to legacy arrays on old telemetry)
+    if (layerState.boundaries) {
+      const edgeSets = "road_edges" in t
+        ? Object.values(t.road_edges || {}).map((e) => e.xs.map((x, i) => [x, e.ys[i]]))
+        : Array.isArray(t.bound_ys) && t.bound_ys.length > 1
+          ? [t.left_bound_xs, t.right_bound_xs].map((xs) => xs.map((x, i) => [x, t.bound_ys[i]]))
+          : [];
       hudCtx.save();
       hudCtx.strokeStyle = "#00e5ff";
       hudCtx.lineWidth = 2;
-      hudCtx.beginPath();
-      for (let i = 0; i < t.bound_ys.length; i++) {
-        const px = t.left_bound_xs[i] * w;
-        const py = t.bound_ys[i] * h;
-        if (i === 0) hudCtx.moveTo(px, py);
-        else hudCtx.lineTo(px, py);
+      for (const pts of edgeSets) {
+        if (pts.length < 2) continue;
+        hudCtx.beginPath();
+        pts.forEach(([x, y], i) => {
+          if (i === 0) hudCtx.moveTo(x * w, y * h);
+          else hudCtx.lineTo(x * w, y * h);
+        });
+        hudCtx.stroke();
       }
-      hudCtx.stroke();
-      hudCtx.beginPath();
-      for (let i = 0; i < t.bound_ys.length; i++) {
-        const px = t.right_bound_xs[i] * w;
-        const py = t.bound_ys[i] * h;
-        if (i === 0) hudCtx.moveTo(px, py);
-        else hudCtx.lineTo(px, py);
-      }
-      hudCtx.stroke();
       hudCtx.restore();
     }
 
@@ -205,10 +206,10 @@
       hudCtx.restore();
     }
 
-    // Layer 5: PyResearch Pothole Boxes (>=90%) - Pass 1 boxes, Pass 2 label pills
+    // Layer 5: YOLOv8 pothole boxes (raw conf >= YOLO_CONF) - Pass 1 boxes, Pass 2 label pills
     if (layerState.potholes && Array.isArray(t.potholes)) {
       const verified = t.potholes
-        .filter((d) => (d.confidence || 0) >= 0.90)
+        .filter((d) => (d.confidence || 0) >= YOLO_CONF)
         .sort((a, b) => (a.in_path === b.in_path ? b.confidence - a.confidence : a.in_path ? -1 : 1));
       const pills = [];
       hudCtx.save();
@@ -314,6 +315,12 @@
   if (layersPotholesOnlyBtn) {
     layersPotholesOnlyBtn.addEventListener("click", () => {
       Object.keys(layerState).forEach((k) => { layerState[k] = (k === "potholes"); });
+      syncLayerCheckboxes();
+    });
+  }
+  if (layersBoundariesOnlyBtn) {
+    layersBoundariesOnlyBtn.addEventListener("click", () => {
+      Object.keys(layerState).forEach((k) => { layerState[k] = (k === "boundaries"); });
       syncLayerCheckboxes();
     });
   }
@@ -509,7 +516,7 @@
   });
 
   async function runPipelineOnUploadedFile(file) {
-    pipelineStatus.textContent = `⏳ Running PyResearch >=90% + Rust C-ABI pipeline on ${file.name}...`;
+    pipelineStatus.textContent = `⏳ Running YOLOv8 @ 0.45 + Rust C-ABI pipeline on ${file.name}...`;
     processUploadBtn.disabled = true;
     try {
       const resp = await fetch("/api/process-video", {
@@ -517,7 +524,7 @@
         headers: {
           "Content-Type": "application/octet-stream",
           "X-Max-Frames": "600",
-          "X-Conf-Threshold": "0.90",
+          "X-Conf-Threshold": String(YOLO_CONF),
           "X-Hud-Layers": JSON.stringify(layerState),
         },
         body: file,
@@ -530,7 +537,7 @@
       videoRaw.src = data.raw_url;
       videoHud.src = data.hud_url;
       rawMeta.textContent = `${file.name} (${data.frames_processed} frames)`;
-      hudMeta.textContent = `PyResearch >=90% + Rust C-ABI (${data.frames_processed} frames @ ${videoFps.toFixed(1)} FPS)`;
+      hudMeta.textContent = `YOLOv8 @ 0.45 + Rust C-ABI (${data.frames_processed} frames @ ${videoFps.toFixed(1)} FPS)`;
       pipelineStatus.textContent = `✓ Processed ${data.frames_processed} frames through PyResearch + libpothole_core.dylib`;
       videoRaw.currentTime = 0;
       videoHud.currentTime = 0;
@@ -552,13 +559,13 @@
   });
 
   presetRustFfiBtn.addEventListener("click", async () => {
-    pipelineStatus.textContent = "⏳ Running PyResearch >=90% + Rust C-ABI pipeline on benchmarks/fixtures/ride_test.mp4...";
+    pipelineStatus.textContent = "⏳ Running YOLOv8 @ 0.45 + Rust C-ABI pipeline on benchmarks/fixtures/ride_test.mp4...";
     presetRustFfiBtn.disabled = true;
     try {
       const resp = await fetch("/api/process-fixture", {
         method: "POST",
         headers: {
-          "X-Conf-Threshold": "0.90",
+          "X-Conf-Threshold": String(YOLO_CONF),
           "X-Hud-Layers": JSON.stringify(layerState),
         },
       });
@@ -570,7 +577,7 @@
       videoRaw.src = data.raw_url;
       videoHud.src = data.hud_url;
       rawMeta.textContent = "benchmarks/fixtures/ride_test.mp4";
-      hudMeta.textContent = `Live PyResearch >=90% + Rust C-ABI (${data.frames_processed} frames)`;
+      hudMeta.textContent = `Live YOLOv8 @ 0.45 + Rust C-ABI (${data.frames_processed} frames)`;
       pipelineStatus.textContent = `✓ Processed ${data.frames_processed} frames from ride_test.mp4 via libpothole_core.dylib`;
       videoRaw.currentTime = 0;
       videoHud.currentTime = 0;

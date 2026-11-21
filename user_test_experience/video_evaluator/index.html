@@ -62,17 +62,18 @@
         📂 Optional: Load Existing HUD Output Video
         <input type="file" id="hud-file-input" accept="video/*" />
       </label>
-      <span id="pipeline-status" class="status-pill">Ready — Upload a video or click Process Benchmark (PyResearch ≥90%)</span>
+      <span id="pipeline-status" class="status-pill">Ready — Upload a video or click Process Benchmark (YOLOv8 @ 0.45)</span>
     </div>
   </section>
 
   <!-- Modular 6-Layer Perception & HUD Toggle Control Bar -->
   <section class="layer-toggles-bar" id="layer-toggles-bar">
     <div class="layer-toggles-head">
-      <span class="layer-section-title">MODULAR PERCEPTION &amp; HUD LAYERS (PYRESEARCH ≥90% THRESHOLD)</span>
+      <span class="layer-section-title">MODULAR PERCEPTION &amp; HUD LAYERS (YOLOv8 RAW CONF ≥ 0.45)</span>
       <div class="layer-actions">
         <button id="layers-all-on-btn" class="btn btn-sm" type="button">All Layers ON</button>
-        <button id="layers-potholes-only-btn" class="btn btn-sm btn-accent" type="button">Isolate Potholes Only (≥90%)</button>
+        <button id="layers-potholes-only-btn" class="btn btn-sm btn-accent" type="button">Isolate Potholes Only (YOLOv8 @ 0.45)</button>
+        <button id="layers-boundaries-only-btn" class="btn btn-sm btn-accent" type="button">Isolate Road Boundaries (Cyan)</button>
         <button id="layers-all-off-btn" class="btn btn-sm" type="button">Clean Raw View (All OFF)</button>
       </div>
     </div>
@@ -88,7 +89,7 @@
 
       <label class="toggle-chip" for="toggle-boundaries">
         <span class="layer-dot dot-boundaries"></span>
-        <span class="toggle-text">Curved Cyan Road Boundaries</span>
+        <span class="toggle-text">Road Boundaries (Cyan)</span>
         <span class="toggle-switch">
           <input type="checkbox" id="toggle-boundaries" class="layer-checkbox" data-layer="boundaries" checked />
           <span class="toggle-slider"></span>
@@ -106,7 +107,7 @@
 
       <label class="toggle-chip" for="toggle-potholes">
         <span class="layer-dot dot-potholes"></span>
-        <span class="toggle-text">PyResearch Pothole Boxes (≥90%)</span>
+        <span class="toggle-text">Pothole Detection (YOLOv8 @ 0.45)</span>
         <span class="toggle-switch">
           <input type="checkbox" id="toggle-potholes" class="layer-checkbox" data-layer="potholes" checked />
           <span class="toggle-slider"></span>

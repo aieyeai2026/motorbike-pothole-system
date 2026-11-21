@@ -163,6 +163,9 @@ def test_t_ux_6_video_evaluator_files_and_controls():
     assert 'id="layers-all-on-btn"' in html
     assert 'id="layers-potholes-only-btn"' in html
     assert 'id="layers-all-off-btn"' in html
+    assert "Pothole Detection (YOLOv8 @ 0.45)" in html
+    assert "Road Boundaries (Cyan)" in html
+    assert 'id="layers-boundaries-only-btn"' in html
     for toggle_id in (
         "toggle-horizon",
         "toggle-boundaries",
@@ -195,7 +198,7 @@ def test_t_ux_7_video_evaluator_live_rust_pipeline_on_uploaded_video(tmp_path):
     )
     parsed_layers, parsed_thresh = VideoEvalRequestHandler._parse_request_layer_options(mock_handler)
     assert parsed_layers == {"horizon": False, "potholes": True}
-    assert parsed_thresh >= 0.90
+    assert parsed_thresh == 0.45  # a request below the raw YOLO gate is clamped up, never down
 
     presets = get_available_presets()
     assert isinstance(presets, list)
@@ -225,11 +228,12 @@ def test_t_ux_7_video_evaluator_live_rust_pipeline_on_uploaded_video(tmp_path):
     assert os.path.getsize(result["output_path"]) > 0
     assert result["frames_processed"] == 10
     assert len(result["telemetry"]) == 10
-    assert result["telemetry"][0]["hazard_count"] >= 1
-    assert result["telemetry"][0]["conf_threshold"] >= 0.90
-    assert all(p["confidence"] >= 0.90 for p in result["telemetry"][0]["potholes"])
+    # A drawn ellipse is not a real pothole, so no detection is required; whatever is reported must clear the gate
+    assert result["telemetry"][0]["conf_threshold"] >= 0.45
+    assert all(p["confidence"] >= 0.45 for t in result["telemetry"] for p in t["potholes"])
     assert 1 <= len(result["telemetry"][0]["distance_ticks"]) <= 4
     assert "vp" in result["telemetry"][0]
+    assert "road_edges" in result["telemetry"][0]
     assert "carpet_ys" in result["telemetry"][0]
     assert "closest_distance_m" in result["telemetry"][0]
     assert "assigned_lane" in result["telemetry"][0]
@@ -280,7 +284,7 @@ def test_t_ux_8_phase6_curved_road_boundaries_and_offroad_clutter_rejection():
 
 
 def test_t_ux_9_phase8_green_carpet_tilting_horizon_and_obstacle_weaving():
-    """Verify Phase 8/9 vanishing point, 0.90 gate, obstacle-weaving green carpet, and independent 6-layer rendering."""
+    """Verify Phase 8/9 vanishing point, 0.45 gate, obstacle-weaving green carpet, and independent 6-layer rendering."""
     import cv2
     import numpy as np
     from video_evaluator.server import (
@@ -313,24 +317,24 @@ def test_t_ux_9_phase8_green_carpet_tilting_horizon_and_obstacle_weaving():
     for lx, rx in zip(clear_res["left_bound_xs"], clear_res["right_bound_xs"]):
         assert lx <= rx
 
-    # Sub-0.90 pothole must be strictly ignored (no deflection, truncation, or collision alert)
-    sub_90_pothole = [
+    # Sub-threshold (< 0.45) pothole must be strictly ignored (no deflection, truncation, or collision alert)
+    sub_gate_pothole = [
         {
             "x_min": 0.38,
             "y_min": 0.62,
             "x_max": 0.62,
             "y_max": 0.76,
             "distance_m": 5.5,
-            "confidence": 0.85,
+            "confidence": 0.30,
             "class_id": 0,
             "in_path": True,
         }
     ]
-    sub90_res = compute_phase8_green_carpet_polygon(
-        frame, x_vp, y_vp, x_left_bot, x_right_bot, kappa_road, detections=sub_90_pothole
+    sub_gate_res = compute_phase8_green_carpet_polygon(
+        frame, x_vp, y_vp, x_left_bot, x_right_bot, kappa_road, detections=sub_gate_pothole
     )
-    assert sub90_res["is_critical_collision"] is False
-    assert sub90_res["y_target_norm"] <= y_vp + 0.04
+    assert sub_gate_res["is_critical_collision"] is False
+    assert sub_gate_res["y_target_norm"] <= y_vp + 0.04
 
     # Obstacle on left-center (x=[0.36, 0.52], y_max=0.68): carpet must weave right & stop before obstacle
     obs_detections = [
@@ -359,7 +363,7 @@ def test_t_ux_9_phase8_green_carpet_tilting_horizon_and_obstacle_weaving():
     ):
         assert xl <= cl <= cr <= xr
 
-    # Imminent unavoidable obstacle directly ahead (>= 0.90, < 8.0m) -> critical flag True
+    # Imminent unavoidable obstacle directly ahead (>= 0.45, < 8.0m) -> critical flag True
     imminent_obs = [
         {
             "x_min": 0.38,
@@ -391,40 +395,118 @@ def test_t_ux_9_phase8_green_carpet_tilting_horizon_and_obstacle_weaving():
         assert not np.array_equal(layered_out, frame), f"Layer {layer_key} produced no visual change when enabled"
 
 
-def test_t_ux_10_pyresearch_pothole_detector_achieves_over_80_percent_output():
-    """Verify pure PyResearch YOLOv12s best.pt detector achieves >=80% positive recall at >=90% confidence with 0 FPs on smooth road."""
+def test_t_ux_10_pyresearch_detector_honest_raw_gate_and_real_video():
+    """YOLOv8 pothole detector: model contract, raw-confidence gate (no remapping), and a real-road video check."""
     import numpy as np
     import torch
     from video_evaluator.pyresearch_pothole_detector import (
-        load_pyresearch_yolo_model,
+        DEFAULT_CONF_THRESHOLD,
         detect_pyresearch_and_road_potholes,
-        evaluate_pothole_benchmark_accuracy,
+        evaluate_video_detections,
+        load_pyresearch_yolo_model,
     )
+
+    assert DEFAULT_CONF_THRESHOLD == 0.45
 
     model = load_pyresearch_yolo_model()
     assert getattr(model, "names", None) == {0: "Pothole"}
-    dummy = torch.zeros((1, 3, 640, 640), dtype=torch.float32)
     with torch.no_grad():
-        out = model(dummy)
+        out = model(torch.zeros((1, 3, 640, 640), dtype=torch.float32))
     assert tuple(out.shape) == (1, 5, 8400)
 
-    # Verify use_yolo=False honors neural-only policy with zero heuristic fallback
-    assert detect_pyresearch_and_road_potholes(np.zeros((360, 640, 3), dtype=np.uint8), use_yolo=False) == ([], 0)
+    # use_yolo=False honors neural-only policy; a blank frame yields nothing even at an absurdly low request
+    blank = np.zeros((360, 640, 3), dtype=np.uint8)
+    assert detect_pyresearch_and_road_potholes(blank, use_yolo=False) == ([], 0)
+    assert detect_pyresearch_and_road_potholes(blank, conf_threshold=0.01) == ([], 0)
 
-    metrics = evaluate_pothole_benchmark_accuracy(use_yolo=True)
-    assert abs((metrics["random_window_end_s"] - metrics["random_window_start_s"]) - 60.0) < 0.25
-    assert len(metrics["sampled_timestamps_s"]) >= 10
-    assert metrics["total_frames"] >= 10
-    assert metrics["detection_rate_pct"] >= 80.0
-    assert metrics["mean_confidence_pct"] >= 90.0
-    for item in metrics["per_frame"]:
-        if item["detections"] > 0:
-            assert item["top_confidence"] >= 0.90
-    assert metrics.get("smooth_road_fp_count", 0) == 0
-    assert metrics["windshield_fp_count"] == 0
-    assert metrics["offroad_fp_count"] == 0
+    # Real road footage (not in the repo): water-filled potholes only appear around frames 156-170 and 232-280;
+    # the bus (frames 0-60), trees, shadows and the ego bike must never produce a box.
+    video = os.environ.get("POTHOLE_TEST_VIDEO", os.path.expanduser("~/Downloads/test2pothole.mp4"))
+    if not os.path.isfile(video):
+        pytest.skip(f"real-road video not found: {video} (set POTHOLE_TEST_VIDEO)")
+
+    result = evaluate_video_detections(video, stride=6)
+    hit_frames = [f["frame"] for f in result["per_frame"] if f["detections"]]
+    assert hit_frames, "expected at least one genuine pothole at raw confidence >= 0.45"
+    for f in result["per_frame"]:
+        for conf, *_ in f["detections"]:
+            assert conf >= 0.45
+    assert all(156 <= fr <= 280 for fr in hit_frames), f"detection outside pothole stretch: {hit_frames}"
 
 
+def _synthetic_road(x_vp, y_vp, s_left, s_right, k, w=640, h=360):
+    """Grass + sky + grey asphalt whose edges follow x = x_vp + s*t + k*t^2, t = y - y_vp (the tracker's own model)."""
+    import cv2
+    import numpy as np
+
+    frame = np.full((h, w, 3), (60, 170, 70), dtype=np.uint8)
+    frame[: int(y_vp * h)] = (235, 215, 190)
+    ys = np.linspace(y_vp, 1.0, 120)
+    t = ys - y_vp
+    left = x_vp + s_left * t + k * t * t
+    right = x_vp + s_right * t + k * t * t
+    poly = np.array(
+        [[int(x * w), int(y * h)] for x, y in zip(left, ys)] + [[int(x * w), int(y * h)] for x, y in zip(right[::-1], ys[::-1])],
+        dtype=np.int32,
+    )
+    cv2.fillPoly(frame, [poly], (112, 112, 116))
+    return frame
 
 
+@pytest.mark.parametrize("x_vp,y_vp,s_left,s_right,k", [
+    (0.50, 0.12, -1.1, 1.2, 0.0),     # straight
+    (0.55, 0.12, -1.0, 1.1, 0.45),    # bends right
+    (0.42, 0.12, -1.1, 1.0, -0.45),   # bends left
+])
+def test_t_ux_11_road_boundaries_recover_known_curved_road(x_vp, y_vp, s_left, s_right, k):
+    """Cyan boundaries converge at the measured vanishing point and hug a road whose geometry is known."""
+    import numpy as np
+    from video_evaluator.road_boundaries import RoadBoundaryTracker
 
+    frame = _synthetic_road(x_vp, y_vp, s_left, s_right, k)
+    tracker = RoadBoundaryTracker()
+    for _ in range(8):
+        geo = tracker.update(frame)
+    assert geo["ok"]
+    assert abs(geo["vp"][0] - x_vp) < 0.04 and abs(geo["vp"][1] - y_vp) < 0.06
+    left, right = geo["left"], geo["right"]
+    assert abs(left["xs"][0] - right["xs"][0]) < 1e-9, "edges must converge at the vanishing point"
+    assert np.all(np.array(right["xs"]) >= np.array(left["xs"]))
+    for yq in (0.25, 0.35, 0.42):
+        t = yq - y_vp
+        for edge, slope in ((left, s_left), (right, s_right)):
+            truth = x_vp + slope * t + k * t * t
+            assert abs(np.interp(yq, edge["ys"], edge["xs"]) - truth) < 0.03
+
+
+def test_t_ux_11b_road_boundaries_on_real_video_never_flare_or_cross():
+    """Real footage: boundaries start within 10 frames, vanish near the horizon, never cross, widen downward."""
+    import cv2
+    import numpy as np
+    from video_evaluator.road_boundaries import RoadBoundaryTracker
+
+    video = os.environ.get("POTHOLE_TEST_VIDEO", os.path.expanduser("~/Downloads/test2pothole.mp4"))
+    if not os.path.isfile(video):
+        pytest.skip(f"real-road video not found: {video} (set POTHOLE_TEST_VIDEO)")
+
+    cap = cv2.VideoCapture(video)
+    tracker = RoadBoundaryTracker()
+    first_valid, idx = None, 0
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        if idx % 2 == 0:
+            geo = tracker.update(frame)
+            if geo["ok"]:
+                first_valid = idx if first_valid is None else first_valid
+                left, right = geo["left"], geo["right"]
+                assert 0.0 <= geo["vp"][1] <= 0.25, f"vanishing point should sit near the far horizon (frame {idx})"
+                assert abs(left["xs"][0] - right["xs"][0]) < 1e-9
+                n = min(len(left["xs"]), len(right["xs"]))
+                width = np.array(right["xs"][:n]) - np.array(left["xs"][:n])
+                assert np.all(width >= -1e-9), f"edges crossed at frame {idx}"
+                assert np.all(np.diff(width) >= -1e-6), f"edges flared inward/outward unnaturally at frame {idx}"
+        idx += 1
+    cap.release()
+    assert first_valid is not None and first_valid <= 10

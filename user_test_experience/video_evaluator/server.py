@@ -31,6 +31,13 @@ from urllib.parse import unquote, urlparse
 import cv2
 import numpy as np
 
+try:
+    from .pyresearch_pothole_detector import DEFAULT_CONF_THRESHOLD
+    from .road_boundaries import RoadBoundaryTracker, point_on_measured_road
+except ImportError:
+    from pyresearch_pothole_detector import DEFAULT_CONF_THRESHOLD
+    from road_boundaries import RoadBoundaryTracker, point_on_measured_road
+
 EVAL_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(EVAL_DIR, "..", ".."))
 FIXTURES_DIR = os.path.join(REPO_ROOT, "benchmarks", "fixtures")
@@ -332,49 +339,33 @@ def build_drivable_polygon_mask(
 
 def extract_pothole_candidates_on_drivable_road(
     frame: np.ndarray,
-    horizon_norm: float,
-    bottom_norm: float,
-    left_poly: List[float],
-    right_poly: List[float],
+    horizon_norm: float = 0.0,
+    bottom_norm: float = 0.0,
+    left_poly: Optional[List[float]] = None,
+    right_poly: Optional[List[float]] = None,
     x_vp: Optional[float] = None,
     x_left_bot: Optional[float] = None,
     x_right_bot: Optional[float] = None,
     use_yolo: bool = True,
     kappa_road: float = 0.0,
     fg_obstacles: Optional[List[Dict[str, Any]]] = None,
-    conf_threshold: float = 0.90,
+    conf_threshold: float = DEFAULT_CONF_THRESHOLD,
 ) -> Tuple[List[float], int]:
     """
-    Phase 9 Pure PyResearch Neural Pothole Extractor (conf_threshold >= 0.90):
-    - Delegates to `detect_pyresearch_and_road_potholes` strictly constrained to
-      the curved drivable road polygon and asphalt surface, excluding vehicles and dome glare.
-    - Packs verified detections into a [1, 7, N] tensor for Rust C-ABI NMS.
+    Full-frame YOLOv8 pothole extractor (raw confidence >= `conf_threshold`, never below the default).
+    The road-geometry arguments are accepted for call compatibility only; detection no longer
+    depends on them. Returns the `[7, N]` tensor packed for the Rust C-ABI NMS.
     """
     try:
         from .pyresearch_pothole_detector import detect_pyresearch_and_road_potholes
     except ImportError:
         from pyresearch_pothole_detector import detect_pyresearch_and_road_potholes
 
-    if x_vp is None:
-        lx_vp = float(np.polyval(left_poly, horizon_norm))
-        rx_vp = float(np.polyval(right_poly, horizon_norm))
-        x_vp = float(np.clip(0.5 * (lx_vp + rx_vp), 0.15, 0.85))
-    if x_left_bot is None:
-        x_left_bot = float(np.clip(np.polyval(left_poly, bottom_norm), 0.02, 0.48))
-    if x_right_bot is None:
-        x_right_bot = float(np.clip(np.polyval(right_poly, bottom_norm), 0.52, 0.98))
-
     return detect_pyresearch_and_road_potholes(
         frame,
-        x_vp=x_vp,
-        y_vp=horizon_norm,
-        x_left_bot=x_left_bot,
-        x_right_bot=x_right_bot,
-        bottom_norm=bottom_norm,
         use_yolo=use_yolo,
-        kappa_road=kappa_road,
         fg_obstacles=fg_obstacles,
-        conf_threshold=max(0.90, float(conf_threshold)),
+        conf_threshold=conf_threshold,
     )
 
 
@@ -672,7 +663,7 @@ def compute_phase8_green_carpet_polygon(
     active_obs = [
         d for d in detections
         if d.get("y_max", 0.0) > y_vp + 0.02
-        and (d.get("class_id", 1) != 0 or float(d.get("confidence", 0.0)) >= 0.90)
+        and (d.get("class_id", 1) != 0 or float(d.get("confidence", 0.0)) >= DEFAULT_CONF_THRESHOLD)
     ]
     y_mid = 0.5 * (y_vp + y_bot)
     lib.pothole_core_eval_green_carpet_row(
@@ -729,7 +720,7 @@ def compute_phase8_green_carpet_polygon(
         is_verified_crater = (
             obs.get("class_id") == 0
             and obs.get("y_max", 1.0) <= 0.77
-            and obs.get("confidence", 0.0) >= 0.90
+            and obs.get("confidence", 0.0) >= DEFAULT_CONF_THRESHOLD
         )
         if not (is_physical_vehicle or is_verified_crater):
             continue
@@ -845,46 +836,78 @@ def compute_perspective_distance_ticks(
     y_bot: float = 0.88,
 ) -> List[Dict[str, float]]:
     """
-    Computes perspective horizontal distance tick coordinates (`5m`, `10m`, `15m`, `20m`)
-    spanning the trajectory corridor so they can render independently of carpet visibility.
+    Computes perspective horizontal distance tick coordinates (5m, 10m, 15m, 20m) using the
+    exact inverse of `pothole_core::geometry::estimate_distance_meters`:
+        road_progress = ((1 - curved) ** (1/0.65))
+        y = horizon + road_progress * (1 - horizon)
+    where curved = (d - 2) / 28  and horizon = y_vp.
+    This keeps tick positions pixel-accurate with the per-box distance labels.
+    The x-extent is taken from the measured road boundary edges (or carpet as fallback).
     """
     ticks: List[Dict[str, float]] = []
-    c_ys = carpet_data.get("carpet_ys", [])
-    c_lxs = carpet_data.get("carpet_left_xs", [])
-    c_rxs = carpet_data.get("carpet_right_xs", [])
+
+    # Sorted ascending (horizon → bottom) for np.interp
     b_ys = carpet_data.get("bound_ys", [])
     b_lxs = carpet_data.get("left_bound_xs", [])
     b_rxs = carpet_data.get("right_bound_xs", [])
+    c_ys = carpet_data.get("carpet_ys", [])
+    c_lxs = carpet_data.get("carpet_left_xs", [])
+    c_rxs = carpet_data.get("carpet_right_xs", [])
 
-    inc_c_ys = c_ys[::-1] if (len(c_ys) >= 2 and c_ys[0] > c_ys[-1]) else c_ys
-    inc_c_lxs = c_lxs[::-1] if (len(c_ys) >= 2 and c_ys[0] > c_ys[-1]) else c_lxs
-    inc_c_rxs = c_rxs[::-1] if (len(c_ys) >= 2 and c_ys[0] > c_ys[-1]) else c_rxs
+    # road_edges from RoadBoundaryTracker take priority (most accurate)
+    road_edges = carpet_data.get("road_edges")
 
-    span_y = max(0.05, y_bot - y_vp)
-    y_target_limit = float(carpet_data.get("y_target_norm", y_vp + 0.02)) - 0.005
+    # Build ascending edge arrays for interpolation
+    if road_edges:
+        edges = list(road_edges.values())
+        edge_ys_l = edges[0]["ys"] if edges else []
+        edge_xs_l = edges[0]["xs"] if edges else []
+        edge_ys_r = edges[1]["ys"] if len(edges) > 1 else edge_ys_l
+        edge_xs_r = edges[1]["xs"] if len(edges) > 1 else edge_xs_l
+        # Ensure ascending y
+        if len(edge_ys_l) >= 2 and edge_ys_l[0] > edge_ys_l[-1]:
+            edge_ys_l, edge_xs_l = edge_ys_l[::-1], edge_xs_l[::-1]
+        if len(edge_ys_r) >= 2 and edge_ys_r[0] > edge_ys_r[-1]:
+            edge_ys_r, edge_xs_r = edge_ys_r[::-1], edge_xs_r[::-1]
+    else:
+        edge_ys_l = edge_xs_l = edge_ys_r = edge_xs_r = []
+
+    if len(c_ys) >= 2 and c_ys[0] > c_ys[-1]:
+        c_ys, c_lxs, c_rxs = c_ys[::-1], c_lxs[::-1], c_rxs[::-1]
+
+    horizon = float(np.clip(y_vp, 0.05, 0.90))
+
     for dist_m in (5.0, 10.0, 15.0, 20.0):
-        t_d = float(np.clip(((28.0 - (dist_m - 2.0)) / 28.0) ** (1.0 / 0.65), 0.10, 0.92))
-        y_d = y_vp + t_d * span_y
-        if y_d < y_target_limit:
+        # Exact inverse of estimate_distance_meters (matches Rust geometry.rs)
+        curved = (dist_m - 2.0) / 28.0
+        road_progress = float(np.clip(1.0 - curved, 0.0, 1.0)) ** (1.0 / 0.65)
+        y_d = float(np.clip(horizon + road_progress * (1.0 - horizon), horizon, 1.0))
+
+        # Skip ticks that land above the visible road area
+        if y_d < y_vp + 0.01:
             continue
-        if len(inc_c_ys) >= 2 and y_d >= inc_c_ys[0] - 0.01:
-            lx_d = float(np.interp(y_d, inc_c_ys, inc_c_lxs))
-            rx_d = float(np.interp(y_d, inc_c_ys, inc_c_rxs))
+
+        # X-extent: prefer road boundary edges → carpet → fallback
+        if edge_ys_l and len(edge_ys_l) >= 2 and y_d <= edge_ys_l[-1] + 0.02:
+            lx_d = float(np.interp(y_d, edge_ys_l, edge_xs_l))
+            rx_d = float(np.interp(y_d, edge_ys_r, edge_xs_r))
+        elif len(c_ys) >= 2 and y_d <= c_ys[-1] + 0.02:
+            lx_d = float(np.interp(y_d, c_ys, c_lxs))
+            rx_d = float(np.interp(y_d, c_ys, c_rxs))
         elif len(b_ys) >= 2:
-            bl = float(np.interp(y_d, b_ys, b_lxs))
-            br = float(np.interp(y_d, b_ys, b_rxs))
-            half_w = max(0.012, 0.5 * (0.02 + (0.18 - 0.02) * t_d))
-            mid = float(np.clip(carpet_data.get("target_gap_x", 0.50), bl + half_w, br - half_w))
-            lx_d, rx_d = mid - half_w, mid + half_w
+            lx_d = float(np.interp(y_d, b_ys, b_lxs))
+            rx_d = float(np.interp(y_d, b_ys, b_rxs))
         else:
-            half_w = max(0.012, 0.5 * (0.02 + (0.18 - 0.02) * t_d))
-            lx_d, rx_d = 0.50 - half_w, 0.50 + half_w
+            # bare fallback: narrow band centred at vanishing-point x
+            half_w = max(0.015, 0.09 * road_progress)
+            mid = float(carpet_data.get("target_gap_x", 0.50))
+            lx_d, rx_d = mid - half_w, mid + half_w
 
         ticks.append({
             "distance_m": int(dist_m),
             "y_norm": round(float(y_d), 4),
-            "x_left_norm": round(float(lx_d), 4),
-            "x_right_norm": round(float(rx_d), 4),
+            "x_left_norm": round(float(np.clip(lx_d, 0.01, 0.98)), 4),
+            "x_right_norm": round(float(np.clip(rx_d, 0.02, 0.99)), 4),
         })
     return ticks
 
@@ -905,7 +928,7 @@ def render_phase8_ar_hud(
     - `distance_ticks`: 5m / 10m / 15m / 20m perspective range ticks
     - `boundaries`: Smooth cyan curved road boundaries converging at (x_vp, y_vp)
     - `horizon`: Tilting green horizon line centered at (x_vp, y_vp) rotated by theta_bank
-    - `potholes`: High-certainty (>=90%) PyResearch pothole bounding boxes & label pills
+    - `potholes`: YOLOv8 (raw conf >= 0.45) PyResearch pothole bounding boxes & label pills
     - `telemetry`: Top telemetry status strip & <8m collision banner
     """
     active_layers = {**DEFAULT_HUD_LAYERS, **(layers or {})}
@@ -948,11 +971,21 @@ def render_phase8_ar_hud(
 
     # Layer 3: Cyan Curved Road Boundaries (#00E5FF -> BGR 255, 229, 0)
     if active_layers.get("boundaries", True):
-        b_ys = carpet_data["bound_ys"]
-        lb_pts = np.array([[int(lx * w), int(yn * h)] for lx, yn in zip(carpet_data["left_bound_xs"], b_ys)], dtype=np.int32)
-        rb_pts = np.array([[int(rx * w), int(yn * h)] for rx, yn in zip(carpet_data["right_bound_xs"], b_ys)], dtype=np.int32)
-        cv2.polylines(out, [lb_pts], False, (255, 229, 0), 2, cv2.LINE_AA)
-        cv2.polylines(out, [rb_pts], False, (255, 229, 0), 2, cv2.LINE_AA)
+        if "road_edges" in carpet_data:
+            # measured edges (RoadBoundaryTracker); None while the tracker has no valid fit -> draw nothing
+            edge_sets = [
+                np.array([[int(x * w), int(y * h)] for x, y in zip(e["xs"], e["ys"])], dtype=np.int32)
+                for e in ((carpet_data["road_edges"] or {}).values())
+            ]
+        else:
+            b_ys = carpet_data["bound_ys"]
+            edge_sets = [
+                np.array([[int(lx * w), int(yn * h)] for lx, yn in zip(carpet_data["left_bound_xs"], b_ys)], dtype=np.int32),
+                np.array([[int(rx * w), int(yn * h)] for rx, yn in zip(carpet_data["right_bound_xs"], b_ys)], dtype=np.int32),
+            ]
+        for pts in edge_sets:
+            if len(pts) > 1:
+                cv2.polylines(out, [pts], False, (255, 229, 0), 2, cv2.LINE_AA)
 
     # Layer 4: Tilting Green Horizon Line (#00E676 -> BGR 118, 230, 0) centered at (x_vp, y_vp)
     if active_layers.get("horizon", True):
@@ -962,9 +995,9 @@ def render_phase8_ar_hud(
         dy = int(span_px * math.sin(theta_bank))
         cv2.line(out, (vp_px - dx, vp_py - dy), (vp_px + dx, vp_py + dy), (118, 230, 0), 2, cv2.LINE_AA)
 
-    # Layer 5: High-Certainty (>=90%) Pothole Boxes (Pass 1) & Non-Overlapping Label Pills (Pass 2)
+    # Layer 5: YOLOv8 Pothole Boxes (raw conf >= DEFAULT_CONF_THRESHOLD) (Pass 1) & Non-Overlapping Label Pills (Pass 2)
     if active_layers.get("potholes", True):
-        verified_dets = [d for d in pothole_detections if float(d.get("confidence", 0.0)) >= 0.90]
+        verified_dets = [d for d in pothole_detections if float(d.get("confidence", 0.0)) >= DEFAULT_CONF_THRESHOLD]
         sorted_dets = sorted(
             verified_dets,
             key=lambda d: (0 if d.get("in_path") else 1, -float(d.get("confidence", 0.0))),
@@ -1029,18 +1062,18 @@ def process_video_through_rust_pipeline(
     target_fps: float = 30.0,
     convert_h264: bool = True,
     layers: Optional[Dict[str, bool]] = None,
-    conf_threshold: float = 0.90,
+    conf_threshold: float = DEFAULT_CONF_THRESHOLD,
 ) -> Dict[str, Any]:
     """
-    Phase 9 Pure PyResearch Neural & Modular 6-Layer AR HUD Pipeline:
+    Pure PyResearch YOLOv8 Neural & Modular 6-Layer AR HUD Pipeline:
     - Computes dynamic vanishing point & road banking tilt for green horizon line.
     - Renders curved cyan road boundaries converging at vanishing point.
-    - Extracts potholes strictly via PyResearch YOLOv12s/v8 >= 0.90 confidence threshold.
+    - Extracts potholes via full-frame PyResearch YOLOv8 at raw confidence >= DEFAULT_CONF_THRESHOLD (0.45).
     - Projects translucent green trajectory carpet weaving around obstacles via Rust FFI.
     - Embeds complete per-frame vector geometry in `telemetry` for instant UI layer toggling.
     """
     lib = get_rust_lib()
-    effective_thresh = max(0.90, float(conf_threshold))
+    effective_thresh = max(DEFAULT_CONF_THRESHOLD, float(conf_threshold))
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
         raise ValueError(f"Could not open video file: {input_path}")
@@ -1063,6 +1096,7 @@ def process_video_through_rust_pipeline(
     processed_count = 0
     prev_vp = (0.50, 0.54)
     prev_bounds: Optional[Tuple[float, float, float, float]] = None
+    road_tracker = RoadBoundaryTracker()
 
     while processed_count < max_frames:
         ret, frame = cap.read()
@@ -1094,7 +1128,10 @@ def process_video_through_rust_pipeline(
             c_center.status_code, "CENTERED"
         )
 
-        # 3. Extract foreground vehicles first, then pure PyResearch YOLO potholes (>= 0.90)
+        # Measured road edges (the horizon from the Phase 8 geometry is clamped to mid-frame and cannot be used to gate boxes)
+        road = road_tracker.update(frame)
+
+        # 3. Extract foreground vehicles first, then full-frame YOLOv8 potholes (raw conf >= threshold)
         fg_obstacles = extract_onroad_obstacles_for_carpet(
             frame, y_vp, x_vp, x_left_bot, x_right_bot, kappa_road, bottom_norm
         )
@@ -1120,6 +1157,7 @@ def process_video_through_rust_pipeline(
         )
 
         pothole_detections: List[Dict[str, Any]] = []
+        rust_count = 0
         if n_anchors > 0:
             tensor_arr = (ctypes.c_float * len(tensor))(*tensor)
             max_out = 10
@@ -1136,6 +1174,7 @@ def process_video_through_rust_pipeline(
                 out_buf,
                 max_out,
             )
+            rust_count = count
             for i in range(count):
                 d = out_buf[i]
                 if float(d.confidence) < effective_thresh:
@@ -1152,7 +1191,9 @@ def process_video_through_rust_pipeline(
                     kappa_road,
                     0.11,
                 )
-                if corridor_code == 0:
+                # `corridor_code` (Rust) only says whether the box is in the bike's path; whether it is on the road is
+                # decided from the measured road edges, not from the mid-frame horizon / 0.75 floor of the old gate.
+                if not point_on_measured_road(road, 0.5 * (float(d.x_min) + float(d.x_max)), float(d.y_max)):
                     continue
                 lane_str = {0: "LEFT", 1: "CENTER", 2: "RIGHT"}.get(d.lane_code, "CENTER")
                 pothole_detections.append({
@@ -1170,17 +1211,19 @@ def process_video_through_rust_pipeline(
 
         all_obstacles = pothole_detections + fg_obstacles
 
-        # 4. Compute Phase 8 Green Carpet weaving around all >=90% potholes & vehicles via Rust FFI
+        # 4. Compute Phase 8 Green Carpet weaving around all YOLOv8 potholes & vehicles via Rust FFI
         carpet_data = compute_phase8_green_carpet_polygon(
             frame, x_vp, y_vp, x_left_bot, x_right_bot, kappa_road, all_obstacles
         )
         ticks = compute_perspective_distance_ticks(y_vp, carpet_data, bottom_norm)
+        # Cyan boundaries: measured road edges converging at the measured vanishing point (None until a valid fit)
+        carpet_data["road_edges"] = {"left": road["left"], "right": road["right"]} if road["ok"] else None
         elapsed_ms = (time.perf_counter_ns() - t0) / 1_000_000.0
 
         # 5. Render modular AR HUD
         hdr = (
-            f"PYRESEARCH >=90% HUD | VP:({x_vp:.2f},{y_vp:.2f}) Bank:{math.degrees(theta_bank):+.1f}deg | "
-            f"Road Hazards:{len(pothole_detections)} | Ego:{center_status} ({c_center.offset_meters:+.2f}m) | {elapsed_ms:.2f}ms"
+            f"YOLOv8 @ {effective_thresh:.2f} HUD | VP:({x_vp:.2f},{y_vp:.2f}) Bank:{math.degrees(theta_bank):+.1f}deg | "
+            f"Road Hazards:{len(pothole_detections)} (model {n_anchors} > rust {rust_count}) | Ego:{center_status} ({c_center.offset_meters:+.2f}m) | {elapsed_ms:.2f}ms"
         )
         out_frame = render_phase8_ar_hud(
             frame,
@@ -1223,6 +1266,10 @@ def process_video_through_rust_pipeline(
             "carpet_ys": [round(float(v), 4) for v in carpet_data["carpet_ys"]],
             "carpet_left_xs": [round(float(v), 4) for v in carpet_data["carpet_left_xs"]],
             "carpet_right_xs": [round(float(v), 4) for v in carpet_data["carpet_right_xs"]],
+            "road_edges": (
+                {k: {"ys": [round(v, 4) for v in e["ys"]], "xs": [round(v, 4) for v in e["xs"]]} for k, e in carpet_data["road_edges"].items()}
+                if carpet_data["road_edges"] else None
+            ),
             "distance_ticks": ticks,
             "potholes": pothole_detections,
             "header_text": hdr,
@@ -1320,13 +1367,13 @@ class VideoEvalRequestHandler(SimpleHTTPRequestHandler):
                     }
             except (ValueError, TypeError):
                 layers = None
-        conf_threshold = 0.90
+        conf_threshold = DEFAULT_CONF_THRESHOLD
         raw_thresh = self.headers.get("X-Conf-Threshold")
         if raw_thresh:
             try:
-                conf_threshold = max(0.90, min(0.99, float(raw_thresh)))
+                conf_threshold = max(DEFAULT_CONF_THRESHOLD, min(0.99, float(raw_thresh)))
             except (ValueError, TypeError):
-                conf_threshold = 0.90
+                conf_threshold = DEFAULT_CONF_THRESHOLD
         return layers, conf_threshold
 
     def do_POST(self) -> None:
@@ -1431,6 +1478,7 @@ class VideoEvalRequestHandler(SimpleHTTPRequestHandler):
             self.send_response(206)
             self.send_header("Content-Type", ctype)
             self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
             self.send_header("Content-Length", str(length))
             self.end_headers()
@@ -1447,6 +1495,7 @@ class VideoEvalRequestHandler(SimpleHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", ctype)
             self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(file_size))
             self.end_headers()
             with open(file_path, "rb") as f:
