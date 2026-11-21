@@ -24,10 +24,11 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlparse
 
 import cv2
@@ -400,12 +401,68 @@ def compute_trajectory_point_pair(
     return center_x - half_w, center_x + half_w
 
 
-def inverse_y_for_distance(distance_m: float, horizon_norm: float) -> float:
-    """Matches pothole_core::geometry::inverse_perspective_y_for_distance (2m..30m)."""
+def estimate_road_distance_meters(
+    y_bottom_norm: float,
+    y_vp: float,
+    y_bot: float = 1.0,
+    min_distance_m: float = 2.0,
+    max_distance_m: float = 30.0,
+) -> float:
+    """
+    Perspective distance over the visible road span `[y_vp, y_bot]`, matching
+    `pothole_core::geometry::estimate_distance_meters` when `y_bot == 1.0` and
+    staying an exact inverse of `compute_perspective_distance_ticks` for any camera mount.
+    """
+    horizon = float(np.clip(y_vp, 0.02, 0.90))
+    road_end = max(horizon + 0.05, float(np.clip(y_bot, horizon + 0.05, 1.0)))
+    y = float(np.clip(y_bottom_norm, horizon, road_end))
+    road_progress = (y - horizon) / (road_end - horizon)
+    curved = 1.0 - (road_progress ** 0.65)
+    distance = min_distance_m + curved * (max_distance_m - min_distance_m)
+    return float(np.clip(distance, min_distance_m, max_distance_m))
+
+
+def detect_ego_road_bottom(
+    frame: np.ndarray,
+    y_vp: float,
+    default_bottom: float = 0.88,
+) -> float:
+    """
+    Finds where the visible road ends at the bottom center of the frame.
+    On helmet/chest-mounted cameras, the motorcycle windscreen/dash/tank occupies the
+    lower frame (`unknown` pixels stay elevated down to the bottom edge). On clean
+    front-mounted dashcams, open asphalt reaches the bottom and `default_bottom` is kept.
+    """
+    try:
+        from .road_boundaries import prepare_masks
+    except ImportError:
+        from road_boundaries import prepare_masks
+
+    masks = prepare_masks(frame)
+    unk = masks["unknown"]
+    mh, mw = unk.shape
+    c0, c1 = int(0.35 * mw), int(0.65 * mw)
+    # Only treat an upper obstruction as the ego dash if the bottom center is also non-asphalt;
+    # a vehicle driving ahead has open road beneath it and leaves the bottom clean.
+    if float(unk[int(0.70 * mh) : int(0.95 * mh), c0:c1].mean()) < 0.12:
+        return default_bottom
+
+    start_py = max(int((y_vp + 0.15) * mh), int(0.45 * mh))
+    end_py = int(default_bottom * mh)
+    for py in range(start_py, end_py):
+        if float(unk[py : min(mh, py + 3), c0:c1].mean()) >= 0.40:
+            return float(np.clip(py / float(mh), max(y_vp + 0.18, 0.46), default_bottom))
+    return default_bottom
+
+
+def inverse_y_for_distance(distance_m: float, horizon_norm: float, y_bot: float = 1.0) -> float:
+    """Exact inverse of `estimate_road_distance_meters` (2m..30m)."""
+    horizon = float(np.clip(horizon_norm, 0.02, 0.90))
+    road_end = max(horizon + 0.05, float(np.clip(y_bot, horizon + 0.05, 1.0)))
     d = float(np.clip(distance_m, 2.0, 30.0))
     curved = (d - 2.0) / 28.0
     road_progress = float(np.clip(1.0 - curved, 0.0, 1.0)) ** (1.0 / 0.65)
-    return float(np.clip(horizon_norm + road_progress * (1.0 - horizon_norm), horizon_norm, 1.0))
+    return float(np.clip(horizon + road_progress * (road_end - horizon), horizon, road_end))
 
 
 def compute_phase8_horizon_and_boundaries(
@@ -546,8 +603,8 @@ def extract_onroad_obstacles_for_carpet(
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 65, 165)
 
-    # Build lookahead road corridor mask extending slightly above y_vp for vehicle roofs straddling horizon
-    y_top_scan = max(0.36, y_vp - 0.12)
+    # Build lookahead road corridor mask starting near y_vp down to y_bot (stops above ego dash)
+    y_top_scan = max(0.05, y_vp - 0.04)
     ys = np.linspace(y_top_scan, y_bot, 24)
     l_pts = []
     r_pts = []
@@ -586,8 +643,10 @@ def extract_onroad_obstacles_for_carpet(
         x_min = bx / float(w)
         x_max = (bx + bw) / float(w)
         x_center = 0.5 * (x_min + x_max)
-        # Skip rider's own windshield/helmet visor at bottom center, but keep tall close trucks/tankers
-        if y_min > 0.56 and y_max >= 0.78 and 0.22 <= x_center <= 0.78:
+        # Skip rider's own windshield/handlebars/mirrors/mounts touching the ego dash at y_bot
+        if y_bot < 0.82 and y_max >= y_bot - 0.04:
+            continue
+        if y_max >= y_bot - 0.02 and y_min > y_bot - 0.14 and 0.22 <= x_center <= 0.78:
             continue
         if y_max < y_vp + 0.038:
             continue
@@ -598,8 +657,8 @@ def extract_onroad_obstacles_for_carpet(
         # Skip huge flat horizontal shadows with almost no height
         if bw / float(max(bh, 1)) > 3.5:
             continue
-        y_max_clamped = min(0.85, float(y_max))
-        dist_m = 2.0 + ((1.0 - ((y_max_clamped - y_vp) / max(0.05, 1.0 - y_vp))) ** 0.65) * 28.0
+        y_max_clamped = min(float(y_bot), float(y_max))
+        dist_m = estimate_road_distance_meters(y_max_clamped, y_vp, y_bot=y_bot)
         obstacles.append({
             "x_min": float(x_min),
             "y_min": float(y_min),
@@ -733,7 +792,7 @@ def compute_phase8_green_carpet_polygon(
         is_physical_vehicle = obs.get("class_id", 1) == 1
         is_verified_crater = (
             obs.get("class_id") == 0
-            and obs.get("y_max", 1.0) <= 0.77
+            and obs.get("y_max", 1.0) <= y_bot + 0.02
             and obs.get("confidence", 0.0) >= DEFAULT_CONF_THRESHOLD
         )
         if not (is_physical_vehicle or is_verified_crater):
@@ -818,6 +877,7 @@ def compute_phase8_green_carpet_polygon(
         carpet_right_xs.append(cr_val)
 
     return {
+        "y_bot": float(y_bot),
         "y_target_norm": float(y_target_norm),
         "target_gap_x": float(target_gap_x),
         "kappa_steer": float(kappa_steer),
@@ -851,16 +911,12 @@ def compute_perspective_distance_ticks(
 ) -> List[Dict[str, float]]:
     """
     Computes perspective horizontal distance tick coordinates (5m, 10m, 15m, 20m) using the
-    exact inverse of `pothole_core::geometry::estimate_distance_meters`:
-        road_progress = ((1 - curved) ** (1/0.65))
-        y = horizon + road_progress * (1 - horizon)
-    where curved = (d - 2) / 28  and horizon = y_vp.
-    This keeps tick positions pixel-accurate with the per-box distance labels.
-    The x-extent is taken from the measured road boundary edges (or carpet as fallback).
+    exact inverse of `estimate_road_distance_meters` over the visible road `[y_vp, y_bot]`.
+    Spans the trajectory corridor (preferring `carpet_left_xs`/`carpet_right_xs` when present,
+    or centered corridor half-width inside road bounds when truncated by an obstacle).
     """
     ticks: List[Dict[str, float]] = []
 
-    # Sorted ascending (horizon → bottom) for np.interp
     b_ys = carpet_data.get("bound_ys", [])
     b_lxs = carpet_data.get("left_bound_xs", [])
     b_rxs = carpet_data.get("right_bound_xs", [])
@@ -868,52 +924,31 @@ def compute_perspective_distance_ticks(
     c_lxs = carpet_data.get("carpet_left_xs", [])
     c_rxs = carpet_data.get("carpet_right_xs", [])
 
-    # road_edges from RoadBoundaryTracker take priority (most accurate)
-    road_edges = carpet_data.get("road_edges")
-
-    # Build ascending edge arrays for interpolation
-    if road_edges:
-        edges = list(road_edges.values())
-        edge_ys_l = edges[0]["ys"] if edges else []
-        edge_xs_l = edges[0]["xs"] if edges else []
-        edge_ys_r = edges[1]["ys"] if len(edges) > 1 else edge_ys_l
-        edge_xs_r = edges[1]["xs"] if len(edges) > 1 else edge_xs_l
-        # Ensure ascending y
-        if len(edge_ys_l) >= 2 and edge_ys_l[0] > edge_ys_l[-1]:
-            edge_ys_l, edge_xs_l = edge_ys_l[::-1], edge_xs_l[::-1]
-        if len(edge_ys_r) >= 2 and edge_ys_r[0] > edge_ys_r[-1]:
-            edge_ys_r, edge_xs_r = edge_ys_r[::-1], edge_xs_r[::-1]
-    else:
-        edge_ys_l = edge_xs_l = edge_ys_r = edge_xs_r = []
-
     if len(c_ys) >= 2 and c_ys[0] > c_ys[-1]:
         c_ys, c_lxs, c_rxs = c_ys[::-1], c_lxs[::-1], c_rxs[::-1]
 
-    horizon = float(np.clip(y_vp, 0.05, 0.90))
+    horizon = float(np.clip(y_vp, 0.02, 0.90))
+    road_end = max(horizon + 0.05, float(np.clip(carpet_data.get("y_bot", y_bot), horizon + 0.05, 1.0)))
 
     for dist_m in (5.0, 10.0, 15.0, 20.0):
-        # Exact inverse of estimate_distance_meters (matches Rust geometry.rs)
         curved = (dist_m - 2.0) / 28.0
         road_progress = float(np.clip(1.0 - curved, 0.0, 1.0)) ** (1.0 / 0.65)
-        y_d = float(np.clip(horizon + road_progress * (1.0 - horizon), horizon, 1.0))
+        y_d = float(np.clip(horizon + road_progress * (road_end - horizon), horizon, road_end))
 
-        # Skip ticks that land above the visible road area
-        if y_d < y_vp + 0.01:
+        if y_d < horizon + 0.01:
             continue
 
-        # X-extent: prefer road boundary edges → carpet → fallback
-        if edge_ys_l and len(edge_ys_l) >= 2 and y_d <= edge_ys_l[-1] + 0.02:
-            lx_d = float(np.interp(y_d, edge_ys_l, edge_xs_l))
-            rx_d = float(np.interp(y_d, edge_ys_r, edge_xs_r))
-        elif len(c_ys) >= 2 and y_d <= c_ys[-1] + 0.02:
+        if len(c_ys) >= 2 and c_ys[0] - 0.01 <= y_d <= c_ys[-1] + 0.01:
             lx_d = float(np.interp(y_d, c_ys, c_lxs))
             rx_d = float(np.interp(y_d, c_ys, c_rxs))
         elif len(b_ys) >= 2:
-            lx_d = float(np.interp(y_d, b_ys, b_lxs))
-            rx_d = float(np.interp(y_d, b_ys, b_rxs))
+            bl = float(np.interp(y_d, b_ys, b_lxs))
+            br = float(np.interp(y_d, b_ys, b_rxs))
+            half_w = max(0.012, 0.5 * (0.02 + (0.18 - 0.02) * road_progress))
+            mid = float(np.clip(carpet_data.get("target_gap_x", 0.50), bl + half_w, br - half_w))
+            lx_d, rx_d = mid - half_w, mid + half_w
         else:
-            # bare fallback: narrow band centred at vanishing-point x
-            half_w = max(0.015, 0.09 * road_progress)
+            half_w = max(0.012, 0.5 * (0.02 + (0.18 - 0.02) * road_progress))
             mid = float(carpet_data.get("target_gap_x", 0.50))
             lx_d, rx_d = mid - half_w, mid + half_w
 
@@ -970,7 +1005,9 @@ def render_phase8_ar_hud(
 
     # Layer 2: Perspective Distance Ticks (5m, 10m, 15m, 20m)
     if active_layers.get("distance_ticks", True):
-        ticks = compute_perspective_distance_ticks(y_vp, carpet_data)
+        ticks = compute_perspective_distance_ticks(
+            y_vp, carpet_data, y_bot=float(carpet_data.get("y_bot", 0.88))
+        )
         for tick in ticks:
             py = int(np.clip(tick["y_norm"], 0.02, 0.98) * h)
             lx = int(np.clip(tick["x_left_norm"], 0.02, 0.96) * w)
@@ -1077,6 +1114,7 @@ def process_video_through_rust_pipeline(
     convert_h264: bool = True,
     layers: Optional[Dict[str, bool]] = None,
     conf_threshold: float = DEFAULT_CONF_THRESHOLD,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> Dict[str, Any]:
     """
     Pure PyResearch YOLOv8 Neural & Modular 6-Layer AR HUD Pipeline:
@@ -1098,6 +1136,10 @@ def process_video_through_rust_pipeline(
 
     out_fps = min(fps_in, target_fps) if fps_in > 0 else 30.0
     step = max(1, int(round(fps_in / out_fps)))
+    raw_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    est_total = min(max_frames, max(1, (raw_count + step - 1) // step)) if raw_count > 0 else max_frames
+    if progress_callback is not None:
+        progress_callback(0, est_total)
     bottom_norm = 0.88
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
@@ -1110,6 +1152,7 @@ def process_video_through_rust_pipeline(
     processed_count = 0
     prev_vp = (0.50, 0.54)
     prev_bounds: Optional[Tuple[float, float, float, float]] = None
+    prev_y_bot = 0.88
     road_tracker = RoadBoundaryTracker()
 
     while processed_count < max_frames:
@@ -1122,10 +1165,28 @@ def process_video_through_rust_pipeline(
 
         t0 = time.perf_counter_ns()
 
-        # 1. Phase 8 vanishing point, tilting horizon, and cyan curved road boundaries
+        # 1. Measure true road boundaries & vanishing point first; fall back to Phase 8 heuristic during warmup
+        road = road_tracker.update(frame)
         x_vp, y_vp, theta_bank, x_left_bot, x_right_bot, kappa_road = compute_phase8_horizon_and_boundaries(
             frame, prev_vp=prev_vp, prev_bounds=prev_bounds
         )
+        if road.get("ok") and road.get("vp") is not None:
+            meas_x_vp, meas_y_vp = road["vp"]
+            x_vp = float(np.clip(meas_x_vp, 0.15, 0.85))
+            y_vp = float(np.clip(meas_y_vp, 0.04, 0.70))
+
+        # Detect where the ego motorcycle dash/windscreen begins (0.88 for clean open-road dashcams)
+        meas_y_bot = detect_ego_road_bottom(frame, y_vp, default_bottom=0.88)
+        bottom_norm = float(np.clip(0.80 * prev_y_bot + 0.20 * meas_y_bot if processed_count > 0 else meas_y_bot, y_vp + 0.15, 0.88))
+        prev_y_bot = bottom_norm
+
+        if road.get("ok") and road_tracker.params:
+            rp = road_tracker.params
+            t_bot = bottom_norm - rp["y_vp"]
+            x_left_bot = float(np.clip(rp["x_vp"] + rp["s_left"] * t_bot + rp["k"] * t_bot * t_bot, 0.02, 0.46))
+            x_right_bot = float(np.clip(rp["x_vp"] + rp["s_right"] * t_bot + rp["k"] * t_bot * t_bot, 0.54, 0.98))
+            kappa_road = float(np.clip(rp["k"] * 0.15, -0.14, 0.14))
+
         prev_vp = (x_vp, y_vp)
         prev_bounds = (x_left_bot, x_right_bot, kappa_road, theta_bank)
 
@@ -1142,14 +1203,11 @@ def process_video_through_rust_pipeline(
             c_center.status_code, "CENTERED"
         )
 
-        # Measured road edges (the horizon from the Phase 8 geometry is clamped to mid-frame and cannot be used to gate boxes)
-        road = road_tracker.update(frame)
-
         # 3. Extract foreground vehicles first, then full-frame YOLOv8 potholes (raw conf >= threshold)
         fg_obstacles = extract_onroad_obstacles_for_carpet(
             frame, y_vp, x_vp, x_left_bot, x_right_bot, kappa_road, bottom_norm
         )
-        road_bottom_norm = 0.75
+        road_bottom_norm = bottom_norm
         b_ys, b_lxs, b_rxs = compute_physical_3pt_road_boundaries(
             frame, x_vp, y_vp, x_left_bot, x_right_bot, kappa_road, y_bot=bottom_norm
         )
@@ -1209,6 +1267,7 @@ def process_video_through_rust_pipeline(
                 # decided from the measured road edges, not from the mid-frame horizon / 0.75 floor of the old gate.
                 if not point_on_measured_road(road, 0.5 * (float(d.x_min) + float(d.x_max)), float(d.y_max)):
                     continue
+                dist_m = estimate_road_distance_meters(float(d.y_max), y_vp, y_bot=bottom_norm)
                 lane_str = {0: "LEFT", 1: "CENTER", 2: "RIGHT"}.get(d.lane_code, "CENTER")
                 pothole_detections.append({
                     "x_min": round(float(d.x_min), 4),
@@ -1216,7 +1275,7 @@ def process_video_through_rust_pipeline(
                     "x_max": round(float(d.x_max), 4),
                     "y_max": round(float(d.y_max), 4),
                     "confidence": round(float(d.confidence), 3),
-                    "distance_m": round(float(d.distance_meters), 2),
+                    "distance_m": round(float(dist_m), 2),
                     "severity": round(float(d.severity_score), 1),
                     "lane": lane_str,
                     "class_id": 0,
@@ -1227,7 +1286,7 @@ def process_video_through_rust_pipeline(
 
         # 4. Compute Phase 8 Green Carpet weaving around all YOLOv8 potholes & vehicles via Rust FFI
         carpet_data = compute_phase8_green_carpet_polygon(
-            frame, x_vp, y_vp, x_left_bot, x_right_bot, kappa_road, all_obstacles
+            frame, x_vp, y_vp, x_left_bot, x_right_bot, kappa_road, all_obstacles, y_bot=bottom_norm
         )
         ticks = compute_perspective_distance_ticks(y_vp, carpet_data, bottom_norm)
         # Cyan boundaries: measured road edges converging at the measured vanishing point (None until a valid fit)
@@ -1290,6 +1349,8 @@ def process_video_through_rust_pipeline(
         })
 
         processed_count += 1
+        if progress_callback is not None:
+            progress_callback(processed_count, est_total)
         frame_idx += 1
 
     cap.release()
@@ -1368,6 +1429,71 @@ def get_available_presets() -> List[Dict[str, str]]:
     ]
 
 
+_JOBS_LOCK = threading.Lock()
+_EVAL_JOBS: Dict[str, Dict[str, Any]] = {}
+
+
+def _start_async_eval_job(
+    job_id: str,
+    raw_path: str,
+    hud_path: str,
+    raw_url: str,
+    hud_url: str,
+    max_frames: int,
+    layers: Optional[Dict[str, bool]],
+    conf_threshold: float,
+) -> None:
+    """Runs video evaluation in a daemon thread so proxy gateways never time out on long CPU jobs."""
+    with _JOBS_LOCK:
+        if len(_EVAL_JOBS) >= 30:
+            oldest = next(iter(_EVAL_JOBS))
+            _EVAL_JOBS.pop(oldest, None)
+        _EVAL_JOBS[job_id] = {
+            "status": "running",
+            "job_id": job_id,
+            "frames_done": 0,
+            "total_frames": 0,
+        }
+
+    def _on_progress(done: int, total: int) -> None:
+        with _JOBS_LOCK:
+            job = _EVAL_JOBS.get(job_id)
+            if job is not None:
+                job["frames_done"] = done
+                job["total_frames"] = total
+
+    def _worker() -> None:
+        try:
+            result = process_video_through_rust_pipeline(
+                raw_path,
+                hud_path,
+                max_frames=max_frames,
+                convert_h264=True,
+                layers=layers,
+                conf_threshold=conf_threshold,
+                progress_callback=_on_progress,
+            )
+            with _JOBS_LOCK:
+                _EVAL_JOBS[job_id] = {
+                    "status": "done",
+                    "job_id": job_id,
+                    "raw_url": raw_url,
+                    "hud_url": hud_url,
+                    "frames_processed": result["frames_processed"],
+                    "fps": result["fps"],
+                    "telemetry": result["telemetry"],
+                }
+        except Exception as exc:
+            with _JOBS_LOCK:
+                _EVAL_JOBS[job_id] = {
+                    "status": "error",
+                    "job_id": job_id,
+                    "error": str(exc),
+                }
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
 class VideoEvalRequestHandler(SimpleHTTPRequestHandler):
     """Serves evaluator frontend, benchmark fixtures with Range support, and live video processing API."""
 
@@ -1411,33 +1537,47 @@ class VideoEvalRequestHandler(SimpleHTTPRequestHandler):
                 conf_threshold = DEFAULT_CONF_THRESHOLD
         return layers, conf_threshold
 
+    def _save_uploaded_video(self) -> Optional[Tuple[str, str, str, str]]:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        if content_length <= 0:
+            self._send_json(400, {"error": "Empty video upload payload"})
+            return None
+        os.makedirs(UPLOADS_DIR, exist_ok=True)
+        job_id = uuid.uuid4().hex[:10]
+        raw_filename = f"raw_{job_id}.mp4"
+        hud_filename = f"hud_{job_id}.mp4"
+        raw_path = os.path.join(UPLOADS_DIR, raw_filename)
+        hud_path = os.path.join(UPLOADS_DIR, hud_filename)
+        remaining = content_length
+        with open(raw_path, "wb") as f:
+            while remaining > 0:
+                chunk = self.rfile.read(min(65536, remaining))
+                if not chunk:
+                    break
+                f.write(chunk)
+                remaining -= len(chunk)
+        return job_id, raw_filename, hud_filename, raw_path, hud_path
+
     def do_POST(self) -> None:
         parsed_path = urlparse(self.path).path
         layers, conf_threshold = self._parse_request_layer_options()
-        if parsed_path == "/api/process-video":
-            content_length = int(self.headers.get("Content-Length", "0"))
-            if content_length <= 0:
-                self._send_json(400, {"error": "Empty video upload payload"})
+        if parsed_path in ("/api/process-video", "/api/process-video-async"):
+            saved = self._save_uploaded_video()
+            if saved is None:
+                return
+            job_id, raw_filename, hud_filename, raw_path, hud_path = saved
+            raw_url = f"/fixtures/uploaded_evals/{raw_filename}"
+            hud_url = f"/fixtures/uploaded_evals/{hud_filename}"
+            max_frames = int(self.headers.get("X-Max-Frames", "600"))
+
+            if parsed_path == "/api/process-video-async":
+                _start_async_eval_job(
+                    job_id, raw_path, hud_path, raw_url, hud_url, max_frames, layers, conf_threshold
+                )
+                self._send_json(202, {"status": "running", "job_id": job_id})
                 return
 
-            os.makedirs(UPLOADS_DIR, exist_ok=True)
-            job_id = uuid.uuid4().hex[:10]
-            raw_filename = f"raw_{job_id}.mp4"
-            hud_filename = f"hud_{job_id}.mp4"
-            raw_path = os.path.join(UPLOADS_DIR, raw_filename)
-            hud_path = os.path.join(UPLOADS_DIR, hud_filename)
-
-            remaining = content_length
-            with open(raw_path, "wb") as f:
-                while remaining > 0:
-                    chunk = self.rfile.read(min(65536, remaining))
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    remaining -= len(chunk)
-
             try:
-                max_frames = int(self.headers.get("X-Max-Frames", "600"))
                 result = process_video_through_rust_pipeline(
                     raw_path,
                     hud_path,
@@ -1449,8 +1589,8 @@ class VideoEvalRequestHandler(SimpleHTTPRequestHandler):
                 self._send_json(200, {
                     "status": "success",
                     "job_id": job_id,
-                    "raw_url": f"/fixtures/uploaded_evals/{raw_filename}",
-                    "hud_url": f"/fixtures/uploaded_evals/{hud_filename}",
+                    "raw_url": raw_url,
+                    "hud_url": hud_url,
                     "frames_processed": result["frames_processed"],
                     "fps": result["fps"],
                     "telemetry": result["telemetry"],
@@ -1459,13 +1599,27 @@ class VideoEvalRequestHandler(SimpleHTTPRequestHandler):
                 self._send_json(500, {"error": str(exc)})
             return
 
-        if parsed_path == "/api/process-fixture":
+        if parsed_path in ("/api/process-fixture", "/api/process-fixture-async"):
             os.makedirs(UPLOADS_DIR, exist_ok=True)
             raw_path = os.path.join(FIXTURES_DIR, "ride_test.mp4")
+            if not os.path.isfile(raw_path):
+                self._send_json(404, {"error": "Benchmark fixture ride_test.mp4 not found on server"})
+                return
             hud_filename = "hud_ride_test_phase6.mp4"
             hud_path = os.path.join(UPLOADS_DIR, hud_filename)
+            raw_url = "/fixtures/ride_test.mp4"
+            hud_url = f"/fixtures/uploaded_evals/{hud_filename}"
+            max_frames = int(self.headers.get("X-Max-Frames", "450"))
+
+            if parsed_path == "/api/process-fixture-async":
+                job_id = uuid.uuid4().hex[:10]
+                _start_async_eval_job(
+                    job_id, raw_path, hud_path, raw_url, hud_url, max_frames, layers, conf_threshold
+                )
+                self._send_json(202, {"status": "running", "job_id": job_id})
+                return
+
             try:
-                max_frames = int(self.headers.get("X-Max-Frames", "450"))
                 result = process_video_through_rust_pipeline(
                     raw_path,
                     hud_path,
@@ -1476,8 +1630,8 @@ class VideoEvalRequestHandler(SimpleHTTPRequestHandler):
                 )
                 self._send_json(200, {
                     "status": "success",
-                    "raw_url": "/fixtures/ride_test.mp4",
-                    "hud_url": f"/fixtures/uploaded_evals/{hud_filename}",
+                    "raw_url": raw_url,
+                    "hud_url": hud_url,
                     "frames_processed": result["frames_processed"],
                     "fps": result["fps"],
                     "telemetry": result["telemetry"],
@@ -1492,6 +1646,17 @@ class VideoEvalRequestHandler(SimpleHTTPRequestHandler):
         parsed_path = urlparse(self.path).path
         if parsed_path == "/api/presets":
             self._send_json(200, {"presets": get_available_presets()})
+            return
+
+        if parsed_path.startswith("/api/job/"):
+            job_id = parsed_path[len("/api/job/"):].strip("/")
+            with _JOBS_LOCK:
+                job = _EVAL_JOBS.get(job_id)
+                snapshot = dict(job) if job is not None else None
+            if snapshot is None:
+                self._send_json(404, {"error": "Job not found"})
+            else:
+                self._send_json(200, snapshot)
             return
 
         file_path = self.translate_path(self.path)
